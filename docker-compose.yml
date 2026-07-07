@@ -1,3 +1,8 @@
+# One-time setup, before first `docker compose up`:
+#   docker network create schloss-net
+# This lets schlussel, schloss, and kuvert reach each other by service
+# name (e.g. http://schlussel:4000) regardless of which repo's compose
+# file started them.
 services:
   schlussel:
     build: .
@@ -17,6 +22,12 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+    networks:
+      - schloss-net
 
 volumes:
   schlussel-data:
+
+networks:
+  schloss-net:
+    external: true
