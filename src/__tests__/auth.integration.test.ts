@@ -649,9 +649,14 @@ describe('GET /auth/me', () => {
 
   it('returns 401 for a tampered token', async () => {
     const parts = accessToken.split('.')
-    // Flip the last character of the signature
+    // Flip a character in the middle of the signature, not the last
+    // one: base64url's final character can carry padding-only bits for
+    // certain byte lengths, so some replacements there decode back to
+    // the exact same signature bytes and the tamper is a no-op.
     const sig = parts[2]!
-    const tamperedSig = sig.slice(0, -1) + (sig.slice(-1) === 'A' ? 'B' : 'A')
+    const mid = Math.floor(sig.length / 2)
+    const tamperedChar = sig[mid] === 'A' ? 'B' : 'A'
+    const tamperedSig = sig.slice(0, mid) + tamperedChar + sig.slice(mid + 1)
     const tampered = `${parts[0]}.${parts[1]}.${tamperedSig}`
 
     const res = await app.request('/auth/me', {
