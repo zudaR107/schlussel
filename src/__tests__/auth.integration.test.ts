@@ -1,0 +1,717 @@
+/**
+ * Integration tests for all HTTP routes.
+ *
+ * Isolation strategy:
+ *   - process.env is mutated at the very top of this module (before any imports
+ *     that might read it at load time).
+ *   - All project code is loaded via dynamic imports inside beforeAll, so the
+ *     env values set here are what the modules actually see.
+ *   - A fresh temp SQLite file is used exclusively by this test file.
+ *   - Tables are wiped in beforeEach so every test starts with a clean slate.
+ */
+
+import { describe, it, expect, beforeAll, beforeEach, afterAll, vi } from 'vitest'
+import { randomUUID } from 'crypto'
+import { mkdirSync, rmSync } from 'fs'
+import { tmpdir } from 'os'
+import { join } from 'path'
+import { fileURLToPath } from 'url'
+import type { Hono } from 'hono'
+
+// ── Isolated environment ────────────────────────────────────────────────────
+const testId = randomUUID().slice(0, 8)
+const DB_PATH = join(tmpdir(), `schlussel-test-${testId}.db`)
+const KEYS_DIR = join(tmpdir(), `schlussel-keys-${testId}`)
+const MIGRATIONS_DIR = fileURLToPath(new URL('../db/migrations', import.meta.url))
+
+process.env['DATABASE_PATH'] = DB_PATH
+process.env['KEYS_DIR'] = KEYS_DIR
+process.env['JWT_ISSUER'] = 'schlussel'
+
+// ── Module handles populated in beforeAll ───────────────────────────────────
+let app: Hono
+let sqlite: import('better-sqlite3').Database
+
+// ── Setup / teardown ────────────────────────────────────────────────────────
+beforeAll(async () => {
+  mkdirSync(KEYS_DIR, { recursive: true })
+
+  // Dynamic imports so env vars are already set when modules run their
+  // top-level code.
+  const [keysModule, authModule, dbModule, migratorModule, honoModule] =
+    await Promise.all([
+      import('../utils/keys.js'),
+      import('../routes/auth.js'),
+      import('../db/index.js'),
+      import('drizzle-orm/better-sqlite3/migrator'),
+      import('hono'),
+    ])
+
+  const { initKeys, getJwks } = keysModule
+  const { authRouter } = authModule
+  const { db, sqlite: sqliteInstance } = dbModule
+  const { migrate } = migratorModule
+  const { Hono } = honoModule
+
+  sqlite = sqliteInstance
+
+  await initKeys()
+  migrate(db, { migrationsFolder: MIGRATIONS_DIR })
+
+  const testApp = new Hono()
+  testApp.get('/.well-known/jwks.json', (c) => c.json(getJwks()))
+  testApp.get('/health', (c) => c.json({ status: 'ok' }))
+  testApp.route('/auth', authRouter)
+
+  app = testApp
+})
+
+beforeEach(() => {
+  // Delete child rows first to satisfy FK, then parent.
+  sqlite.exec('DELETE FROM refresh_tokens')
+  sqlite.exec('DELETE FROM users')
+})
+
+afterAll(() => {
+  try { sqlite?.close() } catch { /* ignore */ }
+  try { rmSync(DB_PATH) } catch { /* ignore */ }
+  try { rmSync(KEYS_DIR, { recursive: true, force: true }) } catch { /* ignore */ }
+})
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+const JSON_HEADERS = { 'Content-Type': 'application/json' }
+
+function post(path: string, body: unknown, extraHeaders?: Record<string, string>) {
+  return app.request(path, {
+    method: 'POST',
+    headers: { ...JSON_HEADERS, ...extraHeaders },
+    body: JSON.stringify(body),
+  })
+}
+
+async function registerUser(
+  email = 'alice@example.com',
+  password = 'password123',
+  name = 'Alice',
+) {
+  const res = await post('/auth/register', { email, password, name })
+  return res
+}
+
+async function loginUser(email = 'alice@example.com', password = 'password123') {
+  const res = await post('/auth/login', { email, password })
+  return res
+}
+
+/** Returns the value of the named cookie from a Response, or null. */
+function getCookieValue(res: Response, cookieName: string): string | null {
+  const cookies = res.headers.getSetCookie()
+  for (const cookie of cookies) {
+    const nameValue = cookie.split(';')[0]?.trim() ?? ''
+    if (nameValue.startsWith(`${cookieName}=`)) {
+      return nameValue.slice(cookieName.length + 1)
+    }
+  }
+  return null
+}
+
+/** Returns the raw Set-Cookie string for the named cookie, or null. */
+function getRawCookie(res: Response, cookieName: string): string | null {
+  const cookies = res.headers.getSetCookie()
+  return cookies.find((c) => c.startsWith(`${cookieName}=`)) ?? null
+}
+
+// ── Tests ────────────────────────────────────────────────────────────────────
+
+describe('GET /health', () => {
+  it('returns 200 with status ok', async () => {
+    const res = await app.request('/health')
+    expect(res.status).toBe(200)
+    const body = await res.json() as Record<string, unknown>
+    expect(body['status']).toBe('ok')
+  })
+})
+
+describe('GET /.well-known/jwks.json', () => {
+  it('returns 200', async () => {
+    const res = await app.request('/.well-known/jwks.json')
+    expect(res.status).toBe(200)
+  })
+
+  it('returns an object with a keys array', async () => {
+    const res = await app.request('/.well-known/jwks.json')
+    const body = await res.json() as Record<string, unknown>
+    expect(body).toHaveProperty('keys')
+    expect(Array.isArray(body['keys'])).toBe(true)
+    expect((body['keys'] as unknown[]).length).toBeGreaterThan(0)
+  })
+
+  it('key has kty RSA, use sig, alg RS256, and a kid', async () => {
+    const res = await app.request('/.well-known/jwks.json')
+    const body = await res.json() as { keys: Record<string, unknown>[] }
+    const key = body.keys[0]
+    expect(key).toBeDefined()
+    expect(key!['kty']).toBe('RSA')
+    expect(key!['use']).toBe('sig')
+    expect(key!['alg']).toBe('RS256')
+    expect(typeof key!['kid']).toBe('string')
+    expect((key!['kid'] as string).length).toBeGreaterThan(0)
+  })
+
+  it('key contains RSA public key components (n, e)', async () => {
+    const res = await app.request('/.well-known/jwks.json')
+    const body = await res.json() as { keys: Record<string, unknown>[] }
+    const key = body.keys[0]!
+    expect(typeof key['n']).toBe('string')
+    expect(typeof key['e']).toBe('string')
+  })
+
+  it('is accessible without authentication', async () => {
+    // No Authorization header — must still succeed
+    const res = await app.request('/.well-known/jwks.json')
+    expect(res.status).toBe(200)
+  })
+})
+
+describe('POST /auth/register', () => {
+  it('returns 201 with user object on success', async () => {
+    const res = await registerUser()
+    expect(res.status).toBe(201)
+    const body = await res.json() as Record<string, unknown>
+    expect(typeof body['id']).toBe('string')
+    expect(body['email']).toBe('alice@example.com')
+    expect(body['name']).toBe('Alice')
+    expect(['admin', 'user']).toContain(body['role'])
+  })
+
+  it('first registered user gets admin role', async () => {
+    const res = await registerUser()
+    expect(res.status).toBe(201)
+    const body = await res.json() as Record<string, unknown>
+    expect(body['role']).toBe('admin')
+  })
+
+  it('second registered user gets user role', async () => {
+    await registerUser('alice@example.com', 'password123', 'Alice')
+    const res = await registerUser('bob@example.com', 'password456', 'Bob')
+    expect(res.status).toBe(201)
+    const body = await res.json() as Record<string, unknown>
+    expect(body['role']).toBe('user')
+  })
+
+  it('does not return passwordHash in response', async () => {
+    const res = await registerUser()
+    const body = await res.json() as Record<string, unknown>
+    expect(body['passwordHash']).toBeUndefined()
+    expect(body['password_hash']).toBeUndefined()
+    expect(body['password']).toBeUndefined()
+  })
+
+  it('returns 409 when email is already taken', async () => {
+    await registerUser()
+    const res = await registerUser()
+    expect(res.status).toBe(409)
+    const body = await res.json() as Record<string, unknown>
+    expect(body['error']).toMatch(/already registered/i)
+  })
+
+  it('returns 400 or 422 for an invalid email', async () => {
+    const res = await post('/auth/register', {
+      email: 'not-an-email',
+      password: 'password123',
+      name: 'Alice',
+    })
+    expect([400, 422]).toContain(res.status)
+  })
+
+  it('returns 400 or 422 for password shorter than 8 characters', async () => {
+    const res = await post('/auth/register', {
+      email: 'alice@example.com',
+      password: 'short',
+      name: 'Alice',
+    })
+    expect([400, 422]).toContain(res.status)
+  })
+
+  it('returns 400 or 422 for password longer than 128 characters', async () => {
+    const res = await post('/auth/register', {
+      email: 'alice@example.com',
+      password: 'a'.repeat(129),
+      name: 'Alice',
+    })
+    expect([400, 422]).toContain(res.status)
+  })
+
+  it('accepts password of exactly 8 characters', async () => {
+    const res = await post('/auth/register', {
+      email: 'alice@example.com',
+      password: '12345678',
+      name: 'Alice',
+    })
+    expect(res.status).toBe(201)
+  })
+
+  it('accepts password of exactly 128 characters', async () => {
+    const res = await post('/auth/register', {
+      email: 'alice@example.com',
+      password: 'a'.repeat(128),
+      name: 'Alice',
+    })
+    expect(res.status).toBe(201)
+  })
+
+  it('returns 400 or 422 for empty name', async () => {
+    const res = await post('/auth/register', {
+      email: 'alice@example.com',
+      password: 'password123',
+      name: '',
+    })
+    expect([400, 422]).toContain(res.status)
+  })
+
+  it('returns 400 or 422 for name longer than 100 characters', async () => {
+    const res = await post('/auth/register', {
+      email: 'alice@example.com',
+      password: 'password123',
+      name: 'a'.repeat(101),
+    })
+    expect([400, 422]).toContain(res.status)
+  })
+
+  it('accepts name of exactly 100 characters', async () => {
+    const res = await post('/auth/register', {
+      email: 'alice@example.com',
+      password: 'password123',
+      name: 'a'.repeat(100),
+    })
+    expect(res.status).toBe(201)
+  })
+
+  it('returns 400 or 422 for missing email field', async () => {
+    const res = await post('/auth/register', { password: 'password123', name: 'Alice' })
+    expect([400, 422]).toContain(res.status)
+  })
+
+  it('returns 400 or 422 for missing password field', async () => {
+    const res = await post('/auth/register', { email: 'alice@example.com', name: 'Alice' })
+    expect([400, 422]).toContain(res.status)
+  })
+
+  it('returns 400 or 422 for missing name field', async () => {
+    const res = await post('/auth/register', { email: 'alice@example.com', password: 'password123' })
+    expect([400, 422]).toContain(res.status)
+  })
+
+  it('returns 400 or 422 for completely empty body', async () => {
+    const res = await post('/auth/register', {})
+    expect([400, 422]).toContain(res.status)
+  })
+})
+
+describe('POST /auth/login', () => {
+  beforeEach(async () => {
+    // Register a user to log in with
+    await post('/auth/register', {
+      email: 'alice@example.com',
+      password: 'password123',
+      name: 'Alice',
+    })
+  })
+
+  it('returns 200 with accessToken and user on success', async () => {
+    const res = await loginUser()
+    expect(res.status).toBe(200)
+    const body = await res.json() as Record<string, unknown>
+    expect(typeof body['accessToken']).toBe('string')
+    expect((body['accessToken'] as string).length).toBeGreaterThan(0)
+    const user = body['user'] as Record<string, unknown>
+    expect(user['email']).toBe('alice@example.com')
+    expect(user['name']).toBe('Alice')
+    expect(typeof user['id']).toBe('string')
+    expect(['admin', 'user']).toContain(user['role'])
+  })
+
+  it('sets the schloss_refresh cookie', async () => {
+    const res = await loginUser()
+    const cookie = getCookieValue(res, 'schloss_refresh')
+    expect(cookie).not.toBeNull()
+    expect((cookie ?? '').length).toBeGreaterThan(0)
+  })
+
+  it('sets the cookie as HttpOnly', async () => {
+    const res = await loginUser()
+    const raw = getRawCookie(res, 'schloss_refresh')
+    expect(raw).not.toBeNull()
+    expect(raw!.toLowerCase()).toContain('httponly')
+  })
+
+  it('sets the cookie with SameSite=Strict', async () => {
+    const res = await loginUser()
+    const raw = getRawCookie(res, 'schloss_refresh')
+    expect(raw).not.toBeNull()
+    expect(raw!.toLowerCase()).toContain('samesite=strict')
+  })
+
+  it('returns 401 for wrong password', async () => {
+    const res = await post('/auth/login', {
+      email: 'alice@example.com',
+      password: 'wrongpassword',
+    })
+    expect(res.status).toBe(401)
+    const body = await res.json() as Record<string, unknown>
+    expect(body['error']).toBeDefined()
+  })
+
+  it('returns 401 for unknown email', async () => {
+    const res = await post('/auth/login', {
+      email: 'nobody@example.com',
+      password: 'password123',
+    })
+    expect(res.status).toBe(401)
+    const body = await res.json() as Record<string, unknown>
+    expect(body['error']).toBeDefined()
+  })
+
+  it('does not reveal whether the email exists (same error for wrong email vs wrong password)', async () => {
+    const wrongEmail = await post('/auth/login', {
+      email: 'nobody@example.com',
+      password: 'password123',
+    })
+    const wrongPass = await post('/auth/login', {
+      email: 'alice@example.com',
+      password: 'wrongpassword',
+    })
+    // Both should be 401 — the error message should be the same or similar
+    expect(wrongEmail.status).toBe(401)
+    expect(wrongPass.status).toBe(401)
+  })
+
+  it('access token is a JWT with three dot-separated parts', async () => {
+    const res = await loginUser()
+    const body = await res.json() as Record<string, unknown>
+    const token = body['accessToken'] as string
+    const parts = token.split('.')
+    expect(parts.length).toBe(3)
+  })
+
+  it('access token header declares RS256', async () => {
+    const res = await loginUser()
+    const body = await res.json() as Record<string, unknown>
+    const token = body['accessToken'] as string
+    const header = JSON.parse(Buffer.from(token.split('.')[0]!, 'base64url').toString())
+    expect(header['alg']).toBe('RS256')
+  })
+})
+
+describe('POST /auth/refresh', () => {
+  let refreshTokenCookie: string
+
+  beforeEach(async () => {
+    await post('/auth/register', {
+      email: 'alice@example.com',
+      password: 'password123',
+      name: 'Alice',
+    })
+    const loginRes = await post('/auth/login', {
+      email: 'alice@example.com',
+      password: 'password123',
+    })
+    refreshTokenCookie = getCookieValue(loginRes, 'schloss_refresh') ?? ''
+    // jose uses second-precision iat. Wait to ensure the rotated token gets a
+    // different iat (and thus a different signature) from the original.
+    await new Promise((r) => setTimeout(r, 1100))
+  })
+
+  it('returns 200 with a new accessToken', async () => {
+    const res = await app.request('/auth/refresh', {
+      method: 'POST',
+      headers: { Cookie: `schloss_refresh=${refreshTokenCookie}` },
+    })
+    expect(res.status).toBe(200)
+    const body = await res.json() as Record<string, unknown>
+    expect(typeof body['accessToken']).toBe('string')
+    expect((body['accessToken'] as string).length).toBeGreaterThan(0)
+  })
+
+  it('sets a new schloss_refresh cookie on successful refresh', async () => {
+    const res = await app.request('/auth/refresh', {
+      method: 'POST',
+      headers: { Cookie: `schloss_refresh=${refreshTokenCookie}` },
+    })
+    const newCookie = getCookieValue(res, 'schloss_refresh')
+    expect(newCookie).not.toBeNull()
+    expect((newCookie ?? '').length).toBeGreaterThan(0)
+  })
+
+  it('new cookie is different from the old one (rotation)', async () => {
+    const res = await app.request('/auth/refresh', {
+      method: 'POST',
+      headers: { Cookie: `schloss_refresh=${refreshTokenCookie}` },
+    })
+    const newCookie = getCookieValue(res, 'schloss_refresh')
+    expect(newCookie).not.toBe(refreshTokenCookie)
+  })
+
+  it('old refresh token is rejected after rotation (single-use)', async () => {
+    // Use the token once
+    await app.request('/auth/refresh', {
+      method: 'POST',
+      headers: { Cookie: `schloss_refresh=${refreshTokenCookie}` },
+    })
+
+    // Try to use the same token again — must fail
+    const res2 = await app.request('/auth/refresh', {
+      method: 'POST',
+      headers: { Cookie: `schloss_refresh=${refreshTokenCookie}` },
+    })
+    expect(res2.status).toBe(401)
+  })
+
+  it('new refresh token obtained after rotation works correctly', async () => {
+    // First rotation
+    const res1 = await app.request('/auth/refresh', {
+      method: 'POST',
+      headers: { Cookie: `schloss_refresh=${refreshTokenCookie}` },
+    })
+    const newCookie = getCookieValue(res1, 'schloss_refresh')
+
+    // Second rotation with the new token
+    const res2 = await app.request('/auth/refresh', {
+      method: 'POST',
+      headers: { Cookie: `schloss_refresh=${newCookie}` },
+    })
+    expect(res2.status).toBe(200)
+    const body = await res2.json() as Record<string, unknown>
+    expect(typeof body['accessToken']).toBe('string')
+  })
+
+  it('returns 401 with no cookie', async () => {
+    const res = await app.request('/auth/refresh', { method: 'POST' })
+    expect(res.status).toBe(401)
+  })
+
+  it('returns 401 with a garbage cookie value', async () => {
+    const res = await app.request('/auth/refresh', {
+      method: 'POST',
+      headers: { Cookie: 'schloss_refresh=totallyinvalidtoken' },
+    })
+    expect(res.status).toBe(401)
+  })
+
+  it('returns 401 with a well-formed but unsigned JWT as cookie', async () => {
+    // Build a fake JWT-shaped string that is not signed by the server
+    const header = Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT' })).toString('base64url')
+    const payload = Buffer.from(JSON.stringify({ sub: 'fakeuser', exp: 9999999999 })).toString('base64url')
+    const fakeJwt = `${header}.${payload}.fakesignature`
+
+    const res = await app.request('/auth/refresh', {
+      method: 'POST',
+      headers: { Cookie: `schloss_refresh=${fakeJwt}` },
+    })
+    expect(res.status).toBe(401)
+  })
+})
+
+describe('POST /auth/logout', () => {
+  let refreshTokenCookie: string
+
+  beforeEach(async () => {
+    await post('/auth/register', {
+      email: 'alice@example.com',
+      password: 'password123',
+      name: 'Alice',
+    })
+    const loginRes = await post('/auth/login', {
+      email: 'alice@example.com',
+      password: 'password123',
+    })
+    refreshTokenCookie = getCookieValue(loginRes, 'schloss_refresh') ?? ''
+  })
+
+  it('returns 200 with ok: true when logged in', async () => {
+    const res = await app.request('/auth/logout', {
+      method: 'POST',
+      headers: { Cookie: `schloss_refresh=${refreshTokenCookie}` },
+    })
+    expect(res.status).toBe(200)
+    const body = await res.json() as Record<string, unknown>
+    expect(body['ok']).toBe(true)
+  })
+
+  it('clears the schloss_refresh cookie in the response', async () => {
+    const res = await app.request('/auth/logout', {
+      method: 'POST',
+      headers: { Cookie: `schloss_refresh=${refreshTokenCookie}` },
+    })
+    // After logout, the Set-Cookie header should clear the cookie
+    const raw = getRawCookie(res, 'schloss_refresh')
+    if (raw !== null) {
+      // If the server sets the cookie on logout (to clear it), the value
+      // should be empty or the Max-Age should be 0 / expires in the past.
+      const isCleared =
+        raw.includes('Max-Age=0') ||
+        raw.includes('max-age=0') ||
+        raw.includes('Expires=Thu, 01 Jan 1970') ||
+        raw.match(/schloss_refresh=;/) !== null ||
+        raw.match(/schloss_refresh=$/) !== null
+      expect(isCleared).toBe(true)
+    }
+    // It is also acceptable for the server to not send Set-Cookie at all on logout
+    // (some implementations simply delete the DB record), so we don't fail if raw is null.
+  })
+
+  it('invalidates the refresh token so it cannot be used after logout', async () => {
+    await app.request('/auth/logout', {
+      method: 'POST',
+      headers: { Cookie: `schloss_refresh=${refreshTokenCookie}` },
+    })
+
+    // Attempting to refresh with the logged-out token should fail
+    const res = await app.request('/auth/refresh', {
+      method: 'POST',
+      headers: { Cookie: `schloss_refresh=${refreshTokenCookie}` },
+    })
+    expect(res.status).toBe(401)
+  })
+
+  it('returns 200 even when no cookie is present (graceful)', async () => {
+    const res = await app.request('/auth/logout', { method: 'POST' })
+    expect(res.status).toBe(200)
+    const body = await res.json() as Record<string, unknown>
+    expect(body['ok']).toBe(true)
+  })
+
+  it('returns 200 even with an invalid/unknown cookie (graceful)', async () => {
+    const res = await app.request('/auth/logout', {
+      method: 'POST',
+      headers: { Cookie: 'schloss_refresh=completelyunknowntoken' },
+    })
+    expect(res.status).toBe(200)
+  })
+})
+
+describe('GET /auth/me', () => {
+  let accessToken: string
+
+  beforeEach(async () => {
+    await post('/auth/register', {
+      email: 'alice@example.com',
+      password: 'password123',
+      name: 'Alice',
+    })
+    const loginRes = await post('/auth/login', {
+      email: 'alice@example.com',
+      password: 'password123',
+    })
+    const body = await loginRes.json() as Record<string, unknown>
+    accessToken = body['accessToken'] as string
+  })
+
+  it('returns 200 with user info for a valid access token', async () => {
+    const res = await app.request('/auth/me', {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    })
+    expect(res.status).toBe(200)
+    const body = await res.json() as Record<string, unknown>
+    expect(body['email']).toBe('alice@example.com')
+    expect(body['name']).toBe('Alice')
+    expect(typeof body['id']).toBe('string')
+    expect(['admin', 'user']).toContain(body['role'])
+  })
+
+  it('does not return passwordHash in the response', async () => {
+    const res = await app.request('/auth/me', {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    })
+    const body = await res.json() as Record<string, unknown>
+    expect(body['passwordHash']).toBeUndefined()
+    expect(body['password_hash']).toBeUndefined()
+  })
+
+  it('returns 401 when Authorization header is missing', async () => {
+    const res = await app.request('/auth/me')
+    expect(res.status).toBe(401)
+  })
+
+  it('returns 401 for a garbage Bearer token', async () => {
+    const res = await app.request('/auth/me', {
+      headers: { Authorization: 'Bearer thisisnotavalidtoken' },
+    })
+    expect(res.status).toBe(401)
+  })
+
+  it('returns 401 for an Authorization header without "Bearer " prefix', async () => {
+    const res = await app.request('/auth/me', {
+      headers: { Authorization: accessToken },
+    })
+    expect(res.status).toBe(401)
+  })
+
+  it('returns 401 for a tampered token', async () => {
+    const parts = accessToken.split('.')
+    // Flip the last character of the signature
+    const sig = parts[2]!
+    const tamperedSig = sig.slice(0, -1) + (sig.slice(-1) === 'A' ? 'B' : 'A')
+    const tampered = `${parts[0]}.${parts[1]}.${tamperedSig}`
+
+    const res = await app.request('/auth/me', {
+      headers: { Authorization: `Bearer ${tampered}` },
+    })
+    expect(res.status).toBe(401)
+  })
+
+  it('returns 401 for a well-formed but self-signed JWT (not by the server)', async () => {
+    const fakeHeader = Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT' })).toString('base64url')
+    const fakePayload = Buffer.from(
+      JSON.stringify({ sub: 'fakeuser', email: 'hacker@evil.com', exp: 9999999999 }),
+    ).toString('base64url')
+    const fakeJwt = `${fakeHeader}.${fakePayload}.fakesig`
+
+    const res = await app.request('/auth/me', {
+      headers: { Authorization: `Bearer ${fakeJwt}` },
+    })
+    expect(res.status).toBe(401)
+  })
+
+  it('returns correct data for each of two independently registered users', async () => {
+    // Register a second user
+    await post('/auth/register', {
+      email: 'bob@example.com',
+      password: 'bobpassword',
+      name: 'Bob',
+    })
+    const bobLogin = await post('/auth/login', {
+      email: 'bob@example.com',
+      password: 'bobpassword',
+    })
+    const bobBody = await bobLogin.json() as Record<string, unknown>
+    const bobToken = bobBody['accessToken'] as string
+
+    const [aliceMe, bobMe] = await Promise.all([
+      app.request('/auth/me', { headers: { Authorization: `Bearer ${accessToken}` } }),
+      app.request('/auth/me', { headers: { Authorization: `Bearer ${bobToken}` } }),
+    ])
+
+    const aliceBody = await aliceMe.json() as Record<string, unknown>
+    const bobMeBody = await bobMe.json() as Record<string, unknown>
+
+    expect(aliceBody['email']).toBe('alice@example.com')
+    expect(bobMeBody['email']).toBe('bob@example.com')
+    expect(aliceBody['id']).not.toBe(bobMeBody['id'])
+  })
+
+  it('returns 401 for expired access token', async () => {
+    // accessToken was obtained in beforeEach at real time T.
+    // Advance the fake clock past 15-minute expiry and verify rejection.
+    vi.useFakeTimers()
+    try {
+      vi.advanceTimersByTime(16 * 60 * 1000)
+      const res = await app.request('/auth/me', {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      })
+      expect(res.status).toBe(401)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})

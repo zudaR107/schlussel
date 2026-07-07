@@ -1,4 +1,5 @@
 import { SignJWT, jwtVerify } from 'jose'
+import { randomUUID } from 'node:crypto'
 import { getPrivateKey, getPublicKey } from './keys.js'
 
 export interface JwtPayload {
@@ -23,7 +24,7 @@ export async function signAccessToken(payload: JwtPayload): Promise<string> {
 }
 
 export async function signRefreshToken(userId: string): Promise<string> {
-  return new SignJWT({})
+  return new SignJWT({ jti: randomUUID() })
     .setProtectedHeader({ alg: 'RS256', kid: 'schloss-1' })
     .setSubject(userId)
     .setIssuedAt()
