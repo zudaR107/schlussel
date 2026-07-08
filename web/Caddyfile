@@ -1,0 +1,13 @@
+:80 {
+	root * /srv
+	encode gzip zstd
+
+	handle /auth/* {
+		reverse_proxy schlussel:4000
+	}
+
+	handle {
+		try_files {path} /index.html
+		file_server
+	}
+}
