@@ -2,6 +2,7 @@
   "name": "schlussel",
   "version": "0.1.0",
   "description": "Schlüssel — auth service for the Schloss platform (RS256 JWT SSO)",
+  "license": "AGPL-3.0-or-later",
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
