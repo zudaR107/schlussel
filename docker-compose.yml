@@ -25,6 +25,18 @@ services:
     networks:
       - schloss-net
 
+  schlussel-web:
+    build:
+      context: .
+      dockerfile: web/Dockerfile
+      args:
+        VITE_ALLOWED_RETURN_ORIGINS: ${ALLOWED_RETURN_ORIGINS:-http://localhost:3000,http://localhost:5174}
+    restart: unless-stopped
+    ports:
+      - "4001:80"
+    networks:
+      - schloss-net
+
 volumes:
   schlussel-data:
 

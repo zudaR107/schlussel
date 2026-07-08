@@ -10,6 +10,13 @@ jobs:
     permissions:
       contents: read
       packages: write
+    strategy:
+      matrix:
+        include:
+          - image: schlussel
+            dockerfile: Dockerfile
+          - image: schlussel-web
+            dockerfile: web/Dockerfile
     steps:
       - uses: actions/checkout@v4
 
@@ -24,10 +31,11 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: .
+          file: ${{ matrix.dockerfile }}
           push: true
           # ghcr.io requires lowercase; github.repository_owner preserves
           # the account's display case (zudaR107), so it's hardcoded here
           # rather than templated.
           tags: |
-            ghcr.io/zudar107/schlussel:latest
-            ghcr.io/zudar107/schlussel:${{ github.sha }}
+            ghcr.io/zudar107/${{ matrix.image }}:latest
+            ghcr.io/zudar107/${{ matrix.image }}:${{ github.sha }}
