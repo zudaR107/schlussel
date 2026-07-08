@@ -10,7 +10,7 @@
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
     "db:studio": "drizzle-kit studio",
-    "lint": "oxlint",
+    "lint": "oxlint src",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage"
   },
