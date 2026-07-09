@@ -106,6 +106,54 @@ describe('LoginPage — invalid return_to', () => {
   })
 })
 
+describe('LoginPage — password visibility toggle', () => {
+  it('shows a toggle button initially labeled "Показать пароль"', async () => {
+    vi.stubEnv('VITE_ALLOWED_RETURN_ORIGINS', 'https://kuvert.test')
+    const { LoginPage } = await setLocation('?return_to=https://kuvert.test/callback')
+    render(<LoginPage />)
+
+    expect(screen.getByRole('button', { name: 'Показать пароль' })).toBeInTheDocument()
+    vi.unstubAllEnvs()
+  })
+
+  it('toggles the password input type and the button label when clicked', async () => {
+    vi.stubEnv('VITE_ALLOWED_RETURN_ORIGINS', 'https://kuvert.test')
+    const { LoginPage } = await setLocation('?return_to=https://kuvert.test/callback')
+    const user = userEvent.setup()
+    render(<LoginPage />)
+
+    const input = document.querySelector('#login-password') as HTMLInputElement
+    expect(input).toHaveAttribute('type', 'password')
+
+    await user.click(screen.getByRole('button', { name: 'Показать пароль' }))
+    expect(input).toHaveAttribute('type', 'text')
+    expect(screen.getByRole('button', { name: 'Скрыть пароль' })).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Скрыть пароль' }))
+    expect(input).toHaveAttribute('type', 'password')
+    expect(screen.getByRole('button', { name: 'Показать пароль' })).toBeInTheDocument()
+    vi.unstubAllEnvs()
+  })
+
+  it('preserves the typed value when toggling visibility', async () => {
+    vi.stubEnv('VITE_ALLOWED_RETURN_ORIGINS', 'https://kuvert.test')
+    const { LoginPage } = await setLocation('?return_to=https://kuvert.test/callback')
+    const user = userEvent.setup()
+    render(<LoginPage />)
+
+    const input = document.querySelector('#login-password') as HTMLInputElement
+    await user.type(input, 'secret123')
+    expect(input).toHaveValue('secret123')
+
+    await user.click(screen.getByRole('button', { name: 'Показать пароль' }))
+    expect(input).toHaveValue('secret123')
+
+    await user.click(screen.getByRole('button', { name: 'Скрыть пароль' }))
+    expect(input).toHaveValue('secret123')
+    vi.unstubAllEnvs()
+  })
+})
+
 describe('LoginPage — register link', () => {
   it('carries the return_to param over to the register link', async () => {
     vi.stubEnv('VITE_ALLOWED_RETURN_ORIGINS', 'https://kuvert.test')
