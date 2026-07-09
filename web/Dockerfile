@@ -10,6 +10,8 @@ RUN pnpm install --frozen-lockfile --filter web
 # docker-compose's build.args.
 ARG VITE_ALLOWED_RETURN_ORIGINS=http://localhost:3000,http://localhost:5174
 ENV VITE_ALLOWED_RETURN_ORIGINS=$VITE_ALLOWED_RETURN_ORIGINS
+ARG VITE_DEFAULT_APP_URL=http://localhost:3000
+ENV VITE_DEFAULT_APP_URL=$VITE_DEFAULT_APP_URL
 
 COPY web ./web
 RUN cd web && pnpm run build
