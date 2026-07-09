@@ -80,7 +80,7 @@ docker compose up -d
 ```
 
 Neither service publishes a host port - both are reached through the
-[Tor](https://github.com/zudaR107/tor) gateway, which fronts the whole platform on one
+[tor](https://github.com/zudaR107/tor) gateway, which fronts the whole platform on one
 address (`http://auth.localhost` for this service, in local dev). Other Schloss services
 on the same `schloss-net` network reach the API directly at `http://schlussel:4000`.
 

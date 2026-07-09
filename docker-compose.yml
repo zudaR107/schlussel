@@ -5,7 +5,7 @@
 # file started them.
 #
 # Neither service publishes a host port - both are reached through the
-# Tor gateway (see https://github.com/zudaR107/tor), which is the only
+# tor gateway (see https://github.com/zudaR107/tor), which is the only
 # container that binds to a host port. `schlussel-data` is given a fixed
 # name so it's the same physical volume whether this compose file is run
 # standalone or included from tor's.
