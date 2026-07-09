@@ -70,7 +70,8 @@ describe('RegisterPage — valid return_to', () => {
 
     await user.type(screen.getByPlaceholderText('Ваше имя'), 'Alice')
     await user.type(screen.getByPlaceholderText(/example/i), 'alice@test.com')
-    await user.type(document.querySelector('input[type="password"]') as Element, 'password1')
+    await user.type(document.querySelectorAll('input[type="password"]')[0], 'password1')
+    await user.type(document.querySelectorAll('input[type="password"]')[1], 'password1')
     await user.click(screen.getByRole('button', { name: 'Зарегистрироваться' }))
 
     await waitFor(() => expect(mockRegister).toHaveBeenCalledWith('alice@test.com', 'password1', 'Alice'))
@@ -86,7 +87,8 @@ describe('RegisterPage — valid return_to', () => {
 
     await user.type(screen.getByPlaceholderText('Ваше имя'), 'Alice')
     await user.type(screen.getByPlaceholderText(/example/i), 'alice@test.com')
-    await user.type(document.querySelector('input[type="password"]') as Element, 'password1')
+    await user.type(document.querySelectorAll('input[type="password"]')[0], 'password1')
+    await user.type(document.querySelectorAll('input[type="password"]')[1], 'password1')
     await user.click(screen.getByRole('button', { name: 'Зарегистрироваться' }))
 
     await waitFor(() => expect(window.location.href).toBe('https://kuvert.test/callback#token=reg-token'))
@@ -103,10 +105,109 @@ describe('RegisterPage — valid return_to', () => {
 
     await user.type(screen.getByPlaceholderText('Ваше имя'), 'Alice')
     await user.type(screen.getByPlaceholderText(/example/i), 'dup@test.com')
-    await user.type(document.querySelector('input[type="password"]') as Element, 'password1')
+    await user.type(document.querySelectorAll('input[type="password"]')[0], 'password1')
+    await user.type(document.querySelectorAll('input[type="password"]')[1], 'password1')
     await user.click(screen.getByRole('button', { name: 'Зарегистрироваться' }))
 
     await screen.findByText('Этот email уже зарегистрирован')
+    vi.unstubAllEnvs()
+  })
+})
+
+describe('RegisterPage — password confirmation', () => {
+  it('blocks submission and shows an error when the passwords do not match', async () => {
+    vi.stubEnv('VITE_ALLOWED_RETURN_ORIGINS', 'https://kuvert.test')
+    const { RegisterPage } = await setLocation('?return_to=https://kuvert.test/callback')
+    const user = userEvent.setup()
+    render(<RegisterPage />)
+
+    await user.type(screen.getByPlaceholderText('Ваше имя'), 'Alice')
+    await user.type(screen.getByPlaceholderText(/example/i), 'alice@test.com')
+    await user.type(document.querySelectorAll('input[type="password"]')[0], 'password1')
+    await user.type(document.querySelectorAll('input[type="password"]')[1], 'password2')
+    await user.click(screen.getByRole('button', { name: 'Зарегистрироваться' }))
+
+    await screen.findByText('Пароли не совпадают')
+    expect(mockRegister).not.toHaveBeenCalled()
+    expect(window.location.href).toBe('')
+    vi.unstubAllEnvs()
+  })
+
+  it('proceeds with registration when the passwords match', async () => {
+    vi.stubEnv('VITE_ALLOWED_RETURN_ORIGINS', 'https://kuvert.test')
+    const { RegisterPage } = await setLocation('?return_to=https://kuvert.test/callback')
+    mockRegister.mockResolvedValue({ accessToken: 'tok', user: { id: '1', email: 'a@a.com', name: 'A', role: 'user' } })
+    const user = userEvent.setup()
+    render(<RegisterPage />)
+
+    await user.type(screen.getByPlaceholderText('Ваше имя'), 'Alice')
+    await user.type(screen.getByPlaceholderText(/example/i), 'alice@test.com')
+    await user.type(document.querySelectorAll('input[type="password"]')[0], 'password1')
+    await user.type(document.querySelectorAll('input[type="password"]')[1], 'password1')
+    await user.click(screen.getByRole('button', { name: 'Зарегистрироваться' }))
+
+    await waitFor(() => expect(mockRegister).toHaveBeenCalledWith('alice@test.com', 'password1', 'Alice'))
+    expect(screen.queryByText('Пароли не совпадают')).not.toBeInTheDocument()
+    vi.unstubAllEnvs()
+  })
+})
+
+describe('RegisterPage — password visibility toggle', () => {
+  it('shows two toggle buttons, both initially labeled "Показать пароль"', async () => {
+    vi.stubEnv('VITE_ALLOWED_RETURN_ORIGINS', 'https://kuvert.test')
+    const { RegisterPage } = await setLocation('?return_to=https://kuvert.test/callback')
+    render(<RegisterPage />)
+
+    const toggles = screen.getAllByRole('button', { name: 'Показать пароль' })
+    expect(toggles).toHaveLength(2)
+    vi.unstubAllEnvs()
+  })
+
+  it('toggles the main password field independently of the confirm field', async () => {
+    vi.stubEnv('VITE_ALLOWED_RETURN_ORIGINS', 'https://kuvert.test')
+    const { RegisterPage } = await setLocation('?return_to=https://kuvert.test/callback')
+    const user = userEvent.setup()
+    render(<RegisterPage />)
+
+    const passwordInput = document.querySelector('#register-password') as HTMLInputElement
+    const confirmInput = document.querySelector('#register-password-confirm') as HTMLInputElement
+    expect(passwordInput).toHaveAttribute('type', 'password')
+    expect(confirmInput).toHaveAttribute('type', 'password')
+
+    const [passwordToggle, confirmToggle] = screen.getAllByRole('button', { name: 'Показать пароль' })
+
+    await user.click(passwordToggle)
+    expect(passwordInput).toHaveAttribute('type', 'text')
+    expect(confirmInput).toHaveAttribute('type', 'password')
+    expect(screen.getByRole('button', { name: 'Скрыть пароль' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Показать пароль' })).toBeInTheDocument()
+
+    await user.click(confirmToggle)
+    expect(passwordInput).toHaveAttribute('type', 'text')
+    expect(confirmInput).toHaveAttribute('type', 'text')
+    expect(screen.getAllByRole('button', { name: 'Скрыть пароль' })).toHaveLength(2)
+
+    vi.unstubAllEnvs()
+  })
+
+  it('preserves typed values in both fields when toggling visibility', async () => {
+    vi.stubEnv('VITE_ALLOWED_RETURN_ORIGINS', 'https://kuvert.test')
+    const { RegisterPage } = await setLocation('?return_to=https://kuvert.test/callback')
+    const user = userEvent.setup()
+    render(<RegisterPage />)
+
+    const passwordInput = document.querySelector('#register-password') as HTMLInputElement
+    const confirmInput = document.querySelector('#register-password-confirm') as HTMLInputElement
+
+    await user.type(passwordInput, 'password1')
+    await user.type(confirmInput, 'password2')
+
+    const [passwordToggle, confirmToggle] = screen.getAllByRole('button', { name: 'Показать пароль' })
+    await user.click(passwordToggle)
+    await user.click(confirmToggle)
+
+    expect(passwordInput).toHaveValue('password1')
+    expect(confirmInput).toHaveValue('password2')
     vi.unstubAllEnvs()
   })
 })

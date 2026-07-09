@@ -2,12 +2,14 @@ import { useState } from 'react'
 import { register, ApiError } from '../../lib/api'
 import { readReturnTo, redirectWithToken, redirectToDefaultApp, withReturnTo } from '../../lib/returnTo'
 import { ErrorPage } from './ErrorPage'
+import { PasswordField } from './PasswordField'
 
 export function RegisterPage() {
   const returnTo = readReturnTo()
   const [name, setName] = useState('')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
+  const [confirmPassword, setConfirmPassword] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
 
@@ -28,6 +30,10 @@ export function RegisterPage() {
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
     setError('')
+    if (password !== confirmPassword) {
+      setError('Пароли не совпадают')
+      return
+    }
     setLoading(true)
     try {
       const { accessToken } = await register(email, password, name)
@@ -91,20 +97,24 @@ export function RegisterPage() {
               autoComplete="email"
             />
           </div>
-          <div>
-            <label className="label" htmlFor="register-password">Пароль</label>
-            <input
-              id="register-password"
-              className="input"
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder="Минимум 8 символов"
-              required
-              minLength={8}
-              autoComplete="new-password"
-            />
-          </div>
+          <PasswordField
+            id="register-password"
+            label="Пароль"
+            value={password}
+            onChange={setPassword}
+            placeholder="Минимум 8 символов"
+            minLength={8}
+            autoComplete="new-password"
+          />
+          <PasswordField
+            id="register-password-confirm"
+            label="Повторите пароль"
+            value={confirmPassword}
+            onChange={setConfirmPassword}
+            placeholder="Минимум 8 символов"
+            minLength={8}
+            autoComplete="new-password"
+          />
 
           {error && (
             <div style={{ padding: '0.625rem 0.75rem', background: 'var(--danger-muted)', border: '1px solid var(--danger)', borderRadius: 8, fontSize: '0.875rem', color: 'var(--danger)' }}>

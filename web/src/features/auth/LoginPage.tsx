@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { login, ApiError } from '../../lib/api'
 import { readReturnTo, redirectWithToken, redirectToDefaultApp, withReturnTo } from '../../lib/returnTo'
 import { ErrorPage } from './ErrorPage'
+import { PasswordField } from './PasswordField'
 
 export function LoginPage() {
   const returnTo = readReturnTo()
@@ -77,19 +78,14 @@ export function LoginPage() {
               autoComplete="email"
             />
           </div>
-          <div>
-            <label className="label" htmlFor="login-password">Пароль</label>
-            <input
-              id="login-password"
-              className="input"
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder="••••••••"
-              required
-              autoComplete="current-password"
-            />
-          </div>
+          <PasswordField
+            id="login-password"
+            label="Пароль"
+            value={password}
+            onChange={setPassword}
+            placeholder="••••••••"
+            autoComplete="current-password"
+          />
 
           {error && (
             <div style={{ padding: '0.625rem 0.75rem', background: 'var(--danger-muted)', border: '1px solid var(--danger)', borderRadius: 8, fontSize: '0.875rem', color: 'var(--danger)' }}>
