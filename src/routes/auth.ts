@@ -1,20 +1,25 @@
 import { Hono } from 'hono'
 import { zValidator } from '@hono/zod-validator'
 import { z } from 'zod'
-import { eq } from 'drizzle-orm'
+import { eq, lt } from 'drizzle-orm'
 import { createId } from '@paralleldrive/cuid2'
 import { db } from '../db/index.js'
-import { users, refreshTokens } from '../db/schema.js'
+import { users, refreshTokens, authCodes, type User } from '../db/schema.js'
 import { hashPassword, verifyPassword } from '../utils/password.js'
 import { signAccessToken, signRefreshToken, verifyToken } from '../utils/jwt.js'
-import { createHash } from 'node:crypto'
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 
 const REFRESH_TOKEN_MAX_AGE = 60 * 60 * 24 * 7 // 7 days in seconds
 const COOKIE_NAME = 'schloss_refresh'
+const AUTH_CODE_MAX_AGE = 60 // seconds
 
 function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex')
 }
+
+// PKCE code_challenge is base64url(SHA256(code_verifier)) - always exactly
+// 43 characters. code_verifier itself is 43-128 chars per RFC 7636.
+const codeChallengeSchema = z.string().regex(/^[A-Za-z0-9_-]{43}$/)
 
 const registerSchema = z.object({
   email: z.string().email(),
@@ -22,10 +27,49 @@ const registerSchema = z.object({
   name: z.string().min(1).max(100),
 })
 
-const loginSchema = z.object({
-  email: z.string().email(),
-  password: z.string(),
+const loginSchema = z
+  .object({
+    email: z.string().email(),
+    password: z.string(),
+    codeChallenge: codeChallengeSchema.optional(),
+    codeChallengeMethod: z.literal('S256').optional(),
+  })
+  .refine(
+    (v) => (v.codeChallenge === undefined) === (v.codeChallengeMethod === undefined),
+    { message: 'codeChallenge and codeChallengeMethod must be given together' },
+  )
+
+const tokenSchema = z.object({
+  code: z.string(),
+  codeVerifier: z.string().regex(/^[A-Za-z0-9_-]{43,128}$/),
 })
+
+// Issues a real access/refresh token pair for a user and sets the refresh
+// cookie - shared by the no-PKCE /login branch and the /token exchange.
+async function issueSession(c: Parameters<typeof setCookieHeader>[0], user: User) {
+  const accessToken = await signAccessToken({
+    sub: user.id,
+    email: user.email,
+    name: user.name,
+    role: user.role,
+  })
+  const refreshToken = await signRefreshToken(user.id)
+
+  await db.insert(refreshTokens).values({
+    id: createId(),
+    userId: user.id,
+    tokenHash: hashToken(refreshToken),
+    expiresAt: new Date(Date.now() + REFRESH_TOKEN_MAX_AGE * 1000),
+    createdAt: new Date(),
+  })
+
+  setCookieHeader(c, refreshToken)
+
+  return {
+    accessToken,
+    user: { id: user.id, email: user.email, name: user.name, role: user.role },
+  }
+}
 
 export const authRouter = new Hono()
 
@@ -56,35 +100,58 @@ authRouter.post('/register', zValidator('json', registerSchema), async (c) => {
 })
 
 authRouter.post('/login', zValidator('json', loginSchema), async (c) => {
-  const { email, password } = c.req.valid('json')
+  const { email, password, codeChallenge } = c.req.valid('json')
 
   const user = await db.select().from(users).where(eq(users.email, email)).get()
   if (!user || !(await verifyPassword(password, user.passwordHash))) {
     return c.json({ error: 'Invalid credentials' }, 401)
   }
 
-  const accessToken = await signAccessToken({
-    sub: user.id,
-    email: user.email,
-    name: user.name,
-    role: user.role,
-  })
-  const refreshToken = await signRefreshToken(user.id)
+  // PKCE handoff: issue a short-lived one-time code instead of a real
+  // token, so the token itself never has to travel through a URL - the
+  // caller redeems it at POST /auth/token with the matching verifier.
+  if (codeChallenge) {
+    const code = randomBytes(32).toString('base64url')
+    await db.insert(authCodes).values({
+      id: createId(),
+      userId: user.id,
+      codeHash: hashToken(code),
+      codeChallenge,
+      expiresAt: new Date(Date.now() + AUTH_CODE_MAX_AGE * 1000),
+      createdAt: new Date(),
+    })
+    return c.json({ code })
+  }
 
-  await db.insert(refreshTokens).values({
-    id: createId(),
-    userId: user.id,
-    tokenHash: hashToken(refreshToken),
-    expiresAt: new Date(Date.now() + REFRESH_TOKEN_MAX_AGE * 1000),
-    createdAt: new Date(),
-  })
+  return c.json(await issueSession(c, user))
+})
 
-  setCookieHeader(c, refreshToken)
+authRouter.post('/token', zValidator('json', tokenSchema), async (c) => {
+  const { code, codeVerifier } = c.req.valid('json')
 
-  return c.json({
-    accessToken,
-    user: { id: user.id, email: user.email, name: user.name, role: user.role },
-  })
+  // Lazy cleanup of expired codes - no cron, same as elsewhere on the
+  // platform; piggybacks on a request that's already touching this table.
+  await db.delete(authCodes).where(lt(authCodes.expiresAt, new Date()))
+
+  const codeHash = hashToken(code)
+  const stored = await db.select().from(authCodes).where(eq(authCodes.codeHash, codeHash)).get()
+  if (!stored) return c.json({ error: 'Invalid or expired code' }, 400)
+
+  // Single-use: delete before validating further, so a second concurrent
+  // redemption attempt with the same code always finds nothing.
+  await db.delete(authCodes).where(eq(authCodes.id, stored.id))
+
+  const computedChallenge = createHash('sha256').update(codeVerifier).digest('base64url')
+  const a = Buffer.from(computedChallenge)
+  const b = Buffer.from(stored.codeChallenge)
+  if (a.length !== b.length || !timingSafeEqual(a, b)) {
+    return c.json({ error: 'Invalid or expired code' }, 400)
+  }
+
+  const user = await db.select().from(users).where(eq(users.id, stored.userId)).get()
+  if (!user) return c.json({ error: 'Invalid or expired code' }, 400)
+
+  return c.json(await issueSession(c, user))
 })
 
 authRouter.post('/refresh', async (c) => {

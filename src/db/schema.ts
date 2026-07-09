@@ -17,6 +17,19 @@ export const refreshTokens = sqliteTable('refresh_tokens', {
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
 })
 
+// OAuth2 authorization-code + PKCE handoff: a short-lived, single-use code
+// issued after a successful login, redeemed once at POST /auth/token for
+// the real access token — so the token itself never appears in a URL.
+export const authCodes = sqliteTable('auth_codes', {
+  id: text('id').primaryKey(),
+  userId: text('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  codeHash: text('code_hash').notNull().unique(),
+  codeChallenge: text('code_challenge').notNull(),
+  expiresAt: integer('expires_at', { mode: 'timestamp' }).notNull(),
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+})
+
 export type User = typeof users.$inferSelect
 export type NewUser = typeof users.$inferInsert
 export type RefreshToken = typeof refreshTokens.$inferSelect
+export type AuthCode = typeof authCodes.$inferSelect
