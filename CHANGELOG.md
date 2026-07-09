@@ -22,3 +22,5 @@ fit best; add a new section if none fits.
 
 ## Docs
 - README, AGPL-3.0 LICENSE, CONTRIBUTING.md.
+- License/CI badges, a link to the Hof meta-repo, fixed Tor->tor URL casing
+  after the gateway repo's rename.

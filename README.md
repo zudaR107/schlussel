@@ -1,5 +1,10 @@
 # Schlüssel
 
+[![Test](https://github.com/zudaR107/schlussel/actions/workflows/test.yml/badge.svg)](https://github.com/zudaR107/schlussel/actions/workflows/test.yml)
+[![License: AGPL v3](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
+
+Part of the [Schloss platform](https://github.com/zudaR107/Hof).
+
 Schlüssel ("key" in German) is the authentication service for **Schloss** — a small
 suite of self-hosted personal services. It's a standalone identity provider: it owns
 user accounts and passwords, signs access tokens, and publishes a public key so every
@@ -75,7 +80,7 @@ docker compose up -d
 ```
 
 Neither service publishes a host port - both are reached through the
-[Tor](https://github.com/zudaR107/Tor) gateway, which fronts the whole platform on one
+[Tor](https://github.com/zudaR107/tor) gateway, which fronts the whole platform on one
 address (`http://auth.localhost` for this service, in local dev). Other Schloss services
 on the same `schloss-net` network reach the API directly at `http://schlussel:4000`.
 
