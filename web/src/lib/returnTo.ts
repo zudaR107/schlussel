@@ -32,6 +32,16 @@ export function redirectWithToken(returnTo: string, accessToken: string) {
   window.location.href = `${returnTo}#token=${accessToken}`
 }
 
+// Where an unguided visitor (no return_to at all) gets sent instead of ever
+// seeing the login/register form - this is what makes these pages
+// unreachable by typing their URL directly; they only render when an
+// external redirect supplied a valid return_to.
+const DEFAULT_APP_URL: string = (import.meta.env.VITE_DEFAULT_APP_URL as string | undefined) ?? 'http://localhost:3000'
+
+export function redirectToDefaultApp() {
+  window.location.href = DEFAULT_APP_URL
+}
+
 export function withReturnTo(path: string, search: string = window.location.search): string {
   const params = new URLSearchParams(search)
   const returnTo = params.get('return_to')

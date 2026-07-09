@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { login, ApiError } from '../../lib/api'
-import { readReturnTo, redirectWithToken, withReturnTo } from '../../lib/returnTo'
+import { readReturnTo, redirectWithToken, redirectToDefaultApp, withReturnTo } from '../../lib/returnTo'
 import { ErrorPage } from './ErrorPage'
 
 export function LoginPage() {
@@ -9,11 +9,20 @@ export function LoginPage() {
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
-  const [done, setDone] = useState(false)
 
-  if (returnTo.present && !returnTo.valid) {
+  // No return_to at all means this page was reached by typing the URL
+  // directly rather than via an external redirect - send the visitor to
+  // the platform's home instead of ever rendering the form.
+  if (!returnTo.present) {
+    redirectToDefaultApp()
+    return null
+  }
+
+  if (!returnTo.valid) {
     return <ErrorPage message="Адрес, на который нужно вернуться после входа, не входит в список разрешённых." />
   }
+
+  const returnToUrl = returnTo.url
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
@@ -21,29 +30,11 @@ export function LoginPage() {
     setLoading(true)
     try {
       const { accessToken } = await login(email, password)
-      if (returnTo.present && returnTo.valid) {
-        redirectWithToken(returnTo.url, accessToken)
-      } else {
-        setDone(true)
-      }
+      redirectWithToken(returnToUrl, accessToken)
     } catch (err) {
       setError(err instanceof ApiError && err.status === 401 ? 'Неверный email или пароль' : 'Не удалось войти')
-    } finally {
       setLoading(false)
     }
-  }
-
-  if (done) {
-    return (
-      <div style={{
-        minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center',
-        background: 'var(--bg-base)', padding: '1rem',
-      }}>
-        <div className="card-elevated" style={{ width: '100%', maxWidth: 380, padding: '2rem', textAlign: 'center' }}>
-          <p style={{ margin: 0, fontSize: '0.875rem', color: 'var(--text-secondary)' }}>Вы вошли в систему.</p>
-        </div>
-      </div>
-    )
   }
 
   return (

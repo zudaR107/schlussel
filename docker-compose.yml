@@ -31,6 +31,7 @@ services:
       dockerfile: web/Dockerfile
       args:
         VITE_ALLOWED_RETURN_ORIGINS: ${ALLOWED_RETURN_ORIGINS:-http://localhost:3000,http://localhost:5174}
+        VITE_DEFAULT_APP_URL: ${DEFAULT_APP_URL:-http://localhost:3000}
     restart: unless-stopped
     ports:
       - "4001:80"

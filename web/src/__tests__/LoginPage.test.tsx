@@ -31,45 +31,31 @@ beforeEach(() => {
 })
 
 describe('LoginPage — no return_to', () => {
-  it('renders the login form', async () => {
+  it('redirects immediately to the hardcoded default app URL when VITE_DEFAULT_APP_URL is not set', async () => {
     const { LoginPage } = await setLocation('')
     render(<LoginPage />)
-    expect(screen.getByPlaceholderText(/example/i)).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Войти' })).toBeInTheDocument()
+    expect(window.location.href).toBe('http://localhost:3000')
   })
 
-  it('does not show an error message initially', async () => {
+  it('redirects immediately to VITE_DEFAULT_APP_URL when it is stubbed', async () => {
+    vi.stubEnv('VITE_DEFAULT_APP_URL', 'https://schloss.example.com')
     const { LoginPage } = await setLocation('')
     render(<LoginPage />)
-    expect(screen.queryByText(/неверный/i)).not.toBeInTheDocument()
+    expect(window.location.href).toBe('https://schloss.example.com')
+    vi.unstubAllEnvs()
   })
 
-  it('shows a success message after login with no return_to, without redirecting', async () => {
+  it('does not render the login form', async () => {
     const { LoginPage } = await setLocation('')
-    mockLogin.mockResolvedValue({ accessToken: 'tok', user: { id: '1', email: 'a@a.com', name: 'A', role: 'user' } })
-    const user = userEvent.setup()
     render(<LoginPage />)
-
-    await user.type(screen.getByPlaceholderText(/example/i), 'a@a.com')
-    await user.type(document.querySelector('input[type="password"]') as Element, 'password1')
-    await user.click(screen.getByRole('button', { name: 'Войти' }))
-
-    await screen.findByText(/вы вошли в систему/i)
-    expect(window.location.href).toBe('')
+    expect(screen.queryByPlaceholderText(/example/i)).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Войти' })).not.toBeInTheDocument()
   })
 
-  it('shows an error message when login rejects', async () => {
+  it('never calls login', async () => {
     const { LoginPage } = await setLocation('')
-    const ApiError = (await import('../lib/api')).ApiError
-    mockLogin.mockRejectedValue(new ApiError(401, 'Invalid credentials'))
-    const user = userEvent.setup()
     render(<LoginPage />)
-
-    await user.type(screen.getByPlaceholderText(/example/i), 'bad@user.com')
-    await user.type(document.querySelector('input[type="password"]') as Element, 'wrong')
-    await user.click(screen.getByRole('button', { name: 'Войти' }))
-
-    await screen.findByText('Неверный email или пароль')
+    expect(mockLogin).not.toHaveBeenCalled()
   })
 })
 
@@ -88,6 +74,22 @@ describe('LoginPage — valid return_to', () => {
     await waitFor(() => expect(window.location.href).toBe('https://kuvert.test/callback#token=the-token'))
     vi.unstubAllEnvs()
   })
+
+  it('shows an error message when login rejects', async () => {
+    vi.stubEnv('VITE_ALLOWED_RETURN_ORIGINS', 'https://kuvert.test')
+    const { LoginPage } = await setLocation('?return_to=https://kuvert.test/callback')
+    const ApiError = (await import('../lib/api')).ApiError
+    mockLogin.mockRejectedValue(new ApiError(401, 'Invalid credentials'))
+    const user = userEvent.setup()
+    render(<LoginPage />)
+
+    await user.type(screen.getByPlaceholderText(/example/i), 'bad@user.com')
+    await user.type(document.querySelector('input[type="password"]') as Element, 'wrong')
+    await user.click(screen.getByRole('button', { name: 'Войти' }))
+
+    await screen.findByText('Неверный email или пароль')
+    vi.unstubAllEnvs()
+  })
 })
 
 describe('LoginPage — invalid return_to', () => {
@@ -99,6 +101,7 @@ describe('LoginPage — invalid return_to', () => {
     expect(screen.getByText(/небезопасный адрес возврата/i)).toBeInTheDocument()
     expect(screen.queryByPlaceholderText(/example/i)).not.toBeInTheDocument()
     expect(mockLogin).not.toHaveBeenCalled()
+    expect(window.location.href).toBe('')
     vi.unstubAllEnvs()
   })
 })
