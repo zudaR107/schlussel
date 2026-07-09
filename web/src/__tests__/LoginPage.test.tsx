@@ -25,6 +25,11 @@ async function setLocation(search: string) {
   return { LoginPage: mod.LoginPage }
 }
 
+// A plausible 43-character base64url code_challenge fixture, valid per the
+// readCodeChallenge contract (see returnTo.test.ts): present + code_challenge_method=S256.
+const CODE_CHALLENGE = 'A'.repeat(43)
+const PKCE_QS = `&code_challenge=${CODE_CHALLENGE}&code_challenge_method=S256`
+
 beforeEach(() => {
   mockLogin.mockReset()
   localStorage.clear()
@@ -60,10 +65,10 @@ describe('LoginPage — no return_to', () => {
 })
 
 describe('LoginPage — valid return_to', () => {
-  it('redirects with the token in the URL fragment on successful login', async () => {
+  it('redirects with the code in the URL query string on successful login (no existing query on return_to)', async () => {
     vi.stubEnv('VITE_ALLOWED_RETURN_ORIGINS', 'https://kuvert.test')
-    const { LoginPage } = await setLocation('?return_to=https://kuvert.test/callback')
-    mockLogin.mockResolvedValue({ accessToken: 'the-token', user: { id: '1', email: 'a@a.com', name: 'A', role: 'user' } })
+    const { LoginPage } = await setLocation(`?return_to=https://kuvert.test/callback${PKCE_QS}`)
+    mockLogin.mockResolvedValue({ code: 'the-code' })
     const user = userEvent.setup()
     render(<LoginPage />)
 
@@ -71,13 +76,53 @@ describe('LoginPage — valid return_to', () => {
     await user.type(document.querySelector('input[type="password"]') as Element, 'password1')
     await user.click(screen.getByRole('button', { name: 'Войти' }))
 
-    await waitFor(() => expect(window.location.href).toBe('https://kuvert.test/callback#token=the-token'))
+    await waitFor(() => expect(window.location.href).toBe('https://kuvert.test/callback?code=the-code'))
+    // No accessToken/fragment-based redirect must remain.
+    expect(window.location.href).not.toContain('#')
+    vi.unstubAllEnvs()
+  })
+
+  it('redirects with &code=<value> appended when the return_to URL already has a query string', async () => {
+    vi.stubEnv('VITE_ALLOWED_RETURN_ORIGINS', 'https://kuvert.test')
+    const { LoginPage } = await setLocation(
+      `?return_to=${encodeURIComponent('https://kuvert.test/callback?next=%2Fbudget')}${PKCE_QS}`,
+    )
+    mockLogin.mockResolvedValue({ code: 'the-code' })
+    const user = userEvent.setup()
+    render(<LoginPage />)
+
+    await user.type(screen.getByPlaceholderText(/example/i), 'a@a.com')
+    await user.type(document.querySelector('input[type="password"]') as Element, 'password1')
+    await user.click(screen.getByRole('button', { name: 'Войти' }))
+
+    await waitFor(() =>
+      expect(window.location.href).toBe('https://kuvert.test/callback?next=%2Fbudget&code=the-code'),
+    )
+    vi.unstubAllEnvs()
+  })
+
+  it('calls login with the email, password, and the code_challenge extracted from the URL', async () => {
+    vi.stubEnv('VITE_ALLOWED_RETURN_ORIGINS', 'https://kuvert.test')
+    const { LoginPage } = await setLocation(`?return_to=https://kuvert.test/callback${PKCE_QS}`)
+    mockLogin.mockResolvedValue({ code: 'the-code' })
+    const user = userEvent.setup()
+    render(<LoginPage />)
+
+    await user.type(screen.getByPlaceholderText(/example/i), 'a@a.com')
+    await user.type(document.querySelector('input[type="password"]') as Element, 'password1')
+    await user.click(screen.getByRole('button', { name: 'Войти' }))
+
+    await waitFor(() => expect(mockLogin).toHaveBeenCalled())
+    const args = mockLogin.mock.calls[0]
+    expect(args).toContain('a@a.com')
+    expect(args).toContain('password1')
+    expect(args).toContain(CODE_CHALLENGE)
     vi.unstubAllEnvs()
   })
 
   it('shows an error message when login rejects', async () => {
     vi.stubEnv('VITE_ALLOWED_RETURN_ORIGINS', 'https://kuvert.test')
-    const { LoginPage } = await setLocation('?return_to=https://kuvert.test/callback')
+    const { LoginPage } = await setLocation(`?return_to=https://kuvert.test/callback${PKCE_QS}`)
     const ApiError = (await import('../lib/api')).ApiError
     mockLogin.mockRejectedValue(new ApiError(401, 'Invalid credentials'))
     const user = userEvent.setup()
@@ -95,7 +140,7 @@ describe('LoginPage — valid return_to', () => {
 describe('LoginPage — invalid return_to', () => {
   it('shows an error page instead of the login form and never calls login', async () => {
     vi.stubEnv('VITE_ALLOWED_RETURN_ORIGINS', 'https://kuvert.test')
-    const { LoginPage } = await setLocation('?return_to=https://evil.test/steal')
+    const { LoginPage } = await setLocation(`?return_to=https://evil.test/steal${PKCE_QS}`)
     render(<LoginPage />)
 
     expect(screen.getByText(/небезопасный адрес возврата/i)).toBeInTheDocument()
@@ -106,10 +151,43 @@ describe('LoginPage — invalid return_to', () => {
   })
 })
 
+describe('LoginPage — missing or invalid code_challenge', () => {
+  it('redirects to the default app URL (same as missing return_to) when return_to is valid but code_challenge is absent', async () => {
+    vi.stubEnv('VITE_ALLOWED_RETURN_ORIGINS', 'https://kuvert.test')
+    const { LoginPage } = await setLocation('?return_to=https://kuvert.test/callback')
+    render(<LoginPage />)
+    expect(window.location.href).toBe('http://localhost:3000')
+    expect(screen.queryByPlaceholderText(/example/i)).not.toBeInTheDocument()
+    expect(mockLogin).not.toHaveBeenCalled()
+    vi.unstubAllEnvs()
+  })
+
+  it('redirects to the default app URL when code_challenge is present but code_challenge_method is not S256', async () => {
+    vi.stubEnv('VITE_ALLOWED_RETURN_ORIGINS', 'https://kuvert.test')
+    const { LoginPage } = await setLocation(
+      `?return_to=https://kuvert.test/callback&code_challenge=${CODE_CHALLENGE}&code_challenge_method=plain`,
+    )
+    render(<LoginPage />)
+    expect(window.location.href).toBe('http://localhost:3000')
+    expect(screen.queryByPlaceholderText(/example/i)).not.toBeInTheDocument()
+    expect(mockLogin).not.toHaveBeenCalled()
+    vi.unstubAllEnvs()
+  })
+
+  it('honors VITE_DEFAULT_APP_URL when redirecting due to missing code_challenge', async () => {
+    vi.stubEnv('VITE_DEFAULT_APP_URL', 'https://schloss.example.com')
+    vi.stubEnv('VITE_ALLOWED_RETURN_ORIGINS', 'https://kuvert.test')
+    const { LoginPage } = await setLocation('?return_to=https://kuvert.test/callback')
+    render(<LoginPage />)
+    expect(window.location.href).toBe('https://schloss.example.com')
+    vi.unstubAllEnvs()
+  })
+})
+
 describe('LoginPage — password visibility toggle', () => {
   it('shows a toggle button initially labeled "Показать пароль"', async () => {
     vi.stubEnv('VITE_ALLOWED_RETURN_ORIGINS', 'https://kuvert.test')
-    const { LoginPage } = await setLocation('?return_to=https://kuvert.test/callback')
+    const { LoginPage } = await setLocation(`?return_to=https://kuvert.test/callback${PKCE_QS}`)
     render(<LoginPage />)
 
     expect(screen.getByRole('button', { name: 'Показать пароль' })).toBeInTheDocument()
@@ -118,7 +196,7 @@ describe('LoginPage — password visibility toggle', () => {
 
   it('toggles the password input type and the button label when clicked', async () => {
     vi.stubEnv('VITE_ALLOWED_RETURN_ORIGINS', 'https://kuvert.test')
-    const { LoginPage } = await setLocation('?return_to=https://kuvert.test/callback')
+    const { LoginPage } = await setLocation(`?return_to=https://kuvert.test/callback${PKCE_QS}`)
     const user = userEvent.setup()
     render(<LoginPage />)
 
@@ -137,7 +215,7 @@ describe('LoginPage — password visibility toggle', () => {
 
   it('preserves the typed value when toggling visibility', async () => {
     vi.stubEnv('VITE_ALLOWED_RETURN_ORIGINS', 'https://kuvert.test')
-    const { LoginPage } = await setLocation('?return_to=https://kuvert.test/callback')
+    const { LoginPage } = await setLocation(`?return_to=https://kuvert.test/callback${PKCE_QS}`)
     const user = userEvent.setup()
     render(<LoginPage />)
 
@@ -157,10 +235,13 @@ describe('LoginPage — password visibility toggle', () => {
 describe('LoginPage — register link', () => {
   it('carries the return_to param over to the register link', async () => {
     vi.stubEnv('VITE_ALLOWED_RETURN_ORIGINS', 'https://kuvert.test')
-    const { LoginPage } = await setLocation('?return_to=https%3A%2F%2Fkuvert.test%2Fcallback')
+    const { LoginPage } = await setLocation(`?return_to=https%3A%2F%2Fkuvert.test%2Fcallback${PKCE_QS}`)
     render(<LoginPage />)
     const link = screen.getByRole('link', { name: /зарегистрироваться/i })
-    expect(link).toHaveAttribute('href', '/register?return_to=https%3A%2F%2Fkuvert.test%2Fcallback')
+    expect(link).toHaveAttribute(
+      'href',
+      `/register?return_to=https%3A%2F%2Fkuvert.test%2Fcallback&code_challenge=${CODE_CHALLENGE}&code_challenge_method=S256`,
+    )
     vi.unstubAllEnvs()
   })
 })

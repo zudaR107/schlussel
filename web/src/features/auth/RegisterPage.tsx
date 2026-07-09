@@ -1,11 +1,12 @@
 import { useState } from 'react'
 import { register, ApiError } from '../../lib/api'
-import { readReturnTo, redirectWithToken, redirectToDefaultApp, withReturnTo } from '../../lib/returnTo'
+import { readReturnTo, readCodeChallenge, redirectWithCode, redirectToDefaultApp, withReturnTo } from '../../lib/returnTo'
 import { ErrorPage } from './ErrorPage'
 import { PasswordField } from './PasswordField'
 
 export function RegisterPage() {
   const returnTo = readReturnTo()
+  const codeChallenge = readCodeChallenge()
   const [name, setName] = useState('')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
@@ -13,10 +14,10 @@ export function RegisterPage() {
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
 
-  // No return_to at all means this page was reached by typing the URL
-  // directly rather than via an external redirect - send the visitor to
-  // the platform's home instead of ever rendering the form.
-  if (!returnTo.present) {
+  // No return_to (or no code_challenge) means this page was reached by
+  // typing the URL directly rather than via an external redirect - send
+  // the visitor to the platform's home instead of ever rendering the form.
+  if (!returnTo.present || !codeChallenge.present) {
     redirectToDefaultApp()
     return null
   }
@@ -26,6 +27,7 @@ export function RegisterPage() {
   }
 
   const returnToUrl = returnTo.url
+  const challenge = codeChallenge.codeChallenge
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
@@ -36,8 +38,8 @@ export function RegisterPage() {
     }
     setLoading(true)
     try {
-      const { accessToken } = await register(email, password, name)
-      redirectWithToken(returnToUrl, accessToken)
+      const { code } = await register(email, password, name, challenge)
+      redirectWithCode(returnToUrl, code)
     } catch (err) {
       setError(err instanceof ApiError && err.status === 409 ? 'Этот email уже зарегистрирован' : 'Не удалось зарегистрироваться')
       setLoading(false)

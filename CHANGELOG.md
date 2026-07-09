@@ -11,6 +11,11 @@ fit best; add a new section if none fits.
   longer reachable by typing the URL directly - a successful sign-in now
   always redirects instead of sometimes dead-ending on a static card.
 - Added password confirmation and a show/hide toggle to the auth forms.
+- Switched the login handoff to OAuth2 Authorization Code + PKCE: the
+  token is no longer delivered via URL fragment. `POST /auth/login` now
+  optionally issues a short-lived one-time code instead of a token, and a
+  new `POST /auth/token` exchanges it (plus the PKCE verifier) for the
+  real access token in a JSON response body.
 
 ## Infrastructure
 - CI (tests + lint) on every push/PR.

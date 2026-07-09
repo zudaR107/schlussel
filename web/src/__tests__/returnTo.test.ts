@@ -1,5 +1,11 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { readReturnTo, redirectWithToken, withReturnTo } from '../lib/returnTo'
+import { readReturnTo, readCodeChallenge, redirectWithCode, withReturnTo } from '../lib/returnTo'
+
+// A plausible 43-character base64url code_challenge fixture (PKCE S256
+// challenges are the base64url-encoded SHA256 digest of a verifier, which is
+// always 43 characters with no padding). The exact bytes don't matter for
+// these tests — only that readCodeChallenge extracts it verbatim.
+const FIXTURE_CHALLENGE = 'A'.repeat(43)
 
 // import.meta.env.VITE_ALLOWED_RETURN_ORIGINS is set in vitest.config.ts's
 // define — but simplest here is to rely on Vite's default test env exposing
@@ -57,31 +63,88 @@ describe('readReturnTo — allowlist enforcement', () => {
   })
 })
 
-describe('redirectWithToken', () => {
-  it('sets location.href to the return_to URL with the token in the fragment', () => {
+describe('readCodeChallenge — no code_challenge param', () => {
+  it('reports not present', () => {
+    const result = readCodeChallenge('')
+    expect(result.present).toBe(false)
+  })
+})
+
+describe('readCodeChallenge — code_challenge present with S256 method', () => {
+  it('reports present and extracts the challenge value', () => {
+    const result = readCodeChallenge(`?code_challenge=${FIXTURE_CHALLENGE}&code_challenge_method=S256`)
+    expect(result).toEqual({ present: true, codeChallenge: FIXTURE_CHALLENGE })
+  })
+
+  it('extracts the challenge value regardless of surrounding params', () => {
+    const result = readCodeChallenge(
+      `?return_to=https%3A%2F%2Fkuvert.example.com&code_challenge=${FIXTURE_CHALLENGE}&code_challenge_method=S256`,
+    )
+    expect(result.present).toBe(true)
+    if (result.present) expect(result.codeChallenge).toBe(FIXTURE_CHALLENGE)
+  })
+})
+
+describe('readCodeChallenge — code_challenge present but code_challenge_method missing', () => {
+  it('reports not present (an unsupported/missing method must not be treated as valid)', () => {
+    const result = readCodeChallenge(`?code_challenge=${FIXTURE_CHALLENGE}`)
+    expect(result.present).toBe(false)
+  })
+})
+
+describe('readCodeChallenge — code_challenge_method is not exactly S256', () => {
+  it('reports not present for method "plain"', () => {
+    const result = readCodeChallenge(`?code_challenge=${FIXTURE_CHALLENGE}&code_challenge_method=plain`)
+    expect(result.present).toBe(false)
+  })
+
+  it('reports not present for an empty method', () => {
+    const result = readCodeChallenge(`?code_challenge=${FIXTURE_CHALLENGE}&code_challenge_method=`)
+    expect(result.present).toBe(false)
+  })
+})
+
+describe('redirectWithCode', () => {
+  it('appends ?code=<value> when the return_to URL has no existing query string', () => {
     const original = window.location
     // @ts-expect-error -- jsdom allows reassigning location for test purposes
     delete window.location
     // @ts-expect-error -- minimal stub, only `href` is used by the function under test
     window.location = { href: '' }
 
-    redirectWithToken('https://kuvert.example.com/auth/callback', 'abc123')
-    expect(window.location.href).toBe('https://kuvert.example.com/auth/callback#token=abc123')
+    redirectWithCode('https://kuvert.test/callback', 'abc123')
+    expect(window.location.href).toBe('https://kuvert.test/callback?code=abc123')
 
     // @ts-expect-error -- restoring jsdom's original Location object
     window.location = original
   })
 
-  it('never puts the token in the query string portion', () => {
+  it('appends &code=<value> when the return_to URL already has a query string', () => {
     const original = window.location
     // @ts-expect-error -- jsdom allows reassigning location for test purposes
     delete window.location
     // @ts-expect-error -- minimal stub, only `href` is used by the function under test
     window.location = { href: '' }
 
-    redirectWithToken('https://kuvert.example.com/auth/callback', 'secret-token')
-    expect(window.location.href).not.toContain('?token=')
-    expect(window.location.href.split('#')[1]).toBe('token=secret-token')
+    redirectWithCode('https://kuvert.test/callback?next=%2Fbudget', 'abc123')
+    expect(window.location.href).toBe('https://kuvert.test/callback?next=%2Fbudget&code=abc123')
+    // Must stay a single valid query string — no second '?'.
+    expect(window.location.href.match(/\?/g)?.length).toBe(1)
+
+    // @ts-expect-error -- restoring jsdom's original Location object
+    window.location = original
+  })
+
+  it('never puts the code in a URL fragment', () => {
+    const original = window.location
+    // @ts-expect-error -- jsdom allows reassigning location for test purposes
+    delete window.location
+    // @ts-expect-error -- minimal stub, only `href` is used by the function under test
+    window.location = { href: '' }
+
+    redirectWithCode('https://kuvert.test/callback', 'secret-code')
+    expect(window.location.href).not.toContain('#')
+    expect(window.location.href).not.toContain('#code=')
 
     // @ts-expect-error -- restoring jsdom's original Location object
     window.location = original

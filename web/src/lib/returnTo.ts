@@ -1,5 +1,5 @@
-// Open-redirect guard: `return_to` drives a client-side redirect carrying an
-// access token in the URL fragment, so its origin must be checked against a
+// Open-redirect guard: `return_to` drives a client-side redirect carrying a
+// one-time authorization code, so its origin must be checked against a
 // build-time allowlist before it's ever used. There is no server in this
 // loop to do the check instead.
 const ALLOWED_ORIGINS: string[] = ((import.meta.env.VITE_ALLOWED_RETURN_ORIGINS as string | undefined) ?? '')
@@ -28,8 +28,25 @@ export function readReturnTo(search: string = window.location.search): ReturnToR
   }
 }
 
-export function redirectWithToken(returnTo: string, accessToken: string) {
-  window.location.href = `${returnTo}#token=${accessToken}`
+export type CodeChallengeResult =
+  | { present: false }
+  | { present: true; codeChallenge: string }
+
+// PKCE: the caller supplies code_challenge/code_challenge_method (S256
+// only - "plain" is not supported) instead of ever handling the real
+// token here. Missing or using an unsupported method is treated the same
+// as absent, since there is nothing safe to do with it otherwise.
+export function readCodeChallenge(search: string = window.location.search): CodeChallengeResult {
+  const params = new URLSearchParams(search)
+  const codeChallenge = params.get('code_challenge')
+  const method = params.get('code_challenge_method')
+  if (!codeChallenge || method !== 'S256') return { present: false }
+  return { present: true, codeChallenge }
+}
+
+export function redirectWithCode(returnTo: string, code: string) {
+  const separator = returnTo.includes('?') ? '&' : '?'
+  window.location.href = `${returnTo}${separator}code=${encodeURIComponent(code)}`
 }
 
 // Where an unguided visitor (no return_to at all) gets sent instead of ever
@@ -42,9 +59,20 @@ export function redirectToDefaultApp() {
   window.location.href = DEFAULT_APP_URL
 }
 
+// Carries return_to AND the PKCE code_challenge/code_challenge_method
+// forward to the sibling login/register page - both are required for that
+// page's own guard to render a form at all, so dropping either here would
+// silently break the cross-navigation link mid-flow.
 export function withReturnTo(path: string, search: string = window.location.search): string {
   const params = new URLSearchParams(search)
   const returnTo = params.get('return_to')
   if (!returnTo) return path
-  return `${path}?return_to=${encodeURIComponent(returnTo)}`
+
+  const forwarded = new URLSearchParams({ return_to: returnTo })
+  const codeChallenge = params.get('code_challenge')
+  const codeChallengeMethod = params.get('code_challenge_method')
+  if (codeChallenge) forwarded.set('code_challenge', codeChallenge)
+  if (codeChallengeMethod) forwarded.set('code_challenge_method', codeChallengeMethod)
+
+  return `${path}?${forwarded.toString()}`
 }
