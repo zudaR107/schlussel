@@ -59,20 +59,25 @@ See `.env.example` for the API. The important ones:
 | `JWT_ISSUER` | Must match what every other service expects as the token issuer |
 | `ALLOWED_ORIGINS` | Comma-separated CORS allowlist |
 
-`web/` reads `VITE_ALLOWED_RETURN_ORIGINS` at *build* time (see `web/Dockerfile`) — a
-comma-separated allowlist of origins the hosted login page is allowed to redirect back
-to after a successful sign-in. This is the open-redirect guard: a `return_to` pointing
-anywhere outside this list is rejected instead of followed.
+`web/` reads two build-time variables (see `web/Dockerfile`): `VITE_ALLOWED_RETURN_ORIGINS`,
+a comma-separated allowlist of origins the hosted login page is allowed to redirect back
+to after a successful sign-in (a `return_to` pointing anywhere outside this list is
+rejected instead of followed - the open-redirect guard), and `VITE_DEFAULT_APP_URL`,
+where a visitor who opened `/login` or `/register` directly (no `return_to` at all) gets
+sent instead of ever seeing the form - these pages are only reachable via an external
+redirect.
 
 ## Running with Docker
 
 ```sh
-docker network create schloss-net   # one-time, shared with the other two repos
+docker network create schloss-net   # one-time, shared with the other repos
 docker compose up -d
 ```
 
-This builds and runs both the API (`:4000`) and the hosted login UI (`:4001`). Other
-Schloss services on the same `schloss-net` network reach the API at `http://schlussel:4000`.
+Neither service publishes a host port - both are reached through the
+[Tor](https://github.com/zudaR107/Tor) gateway, which fronts the whole platform on one
+address (`http://auth.localhost` for this service, in local dev). Other Schloss services
+on the same `schloss-net` network reach the API directly at `http://schlussel:4000`.
 
 ## License
 

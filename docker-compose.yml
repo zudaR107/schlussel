@@ -3,12 +3,16 @@
 # This lets schlussel, schloss, and kuvert reach each other by service
 # name (e.g. http://schlussel:4000) regardless of which repo's compose
 # file started them.
+#
+# Neither service publishes a host port - both are reached through the
+# Tor gateway (see https://github.com/zudaR107/Tor), which is the only
+# container that binds to a host port. `schlussel-data` is given a fixed
+# name so it's the same physical volume whether this compose file is run
+# standalone or included from Tor's.
 services:
   schlussel:
     build: .
     restart: unless-stopped
-    ports:
-      - "4000:4000"
     volumes:
       - schlussel-data:/data
     environment:
@@ -16,7 +20,7 @@ services:
       - KEYS_DIR=/data/keys
       - PORT=4000
       - JWT_ISSUER=schlussel
-      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:3000,http://localhost:5173}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost,http://auth.localhost}
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:4000/health"]
       interval: 30s
@@ -30,16 +34,15 @@ services:
       context: .
       dockerfile: web/Dockerfile
       args:
-        VITE_ALLOWED_RETURN_ORIGINS: ${ALLOWED_RETURN_ORIGINS:-http://localhost:3000,http://localhost:5174}
-        VITE_DEFAULT_APP_URL: ${DEFAULT_APP_URL:-http://localhost:3000}
+        VITE_ALLOWED_RETURN_ORIGINS: ${ALLOWED_RETURN_ORIGINS:-http://localhost,http://kuvert.localhost}
+        VITE_DEFAULT_APP_URL: ${DEFAULT_APP_URL:-http://localhost}
     restart: unless-stopped
-    ports:
-      - "4001:80"
     networks:
       - schloss-net
 
 volumes:
   schlussel-data:
+    name: schlussel-data
 
 networks:
   schloss-net:
