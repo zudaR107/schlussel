@@ -20,7 +20,7 @@ services:
       - KEYS_DIR=/data/keys
       - PORT=4000
       - JWT_ISSUER=schlussel
-      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost,http://auth.localhost}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-https://localhost,https://auth.localhost}
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:4000/health"]
       interval: 30s
@@ -34,8 +34,8 @@ services:
       context: .
       dockerfile: web/Dockerfile
       args:
-        VITE_ALLOWED_RETURN_ORIGINS: ${ALLOWED_RETURN_ORIGINS:-http://localhost,http://kuvert.localhost}
-        VITE_DEFAULT_APP_URL: ${DEFAULT_APP_URL:-http://localhost}
+        VITE_ALLOWED_RETURN_ORIGINS: ${ALLOWED_RETURN_ORIGINS:-https://localhost,https://kuvert.localhost}
+        VITE_DEFAULT_APP_URL: ${DEFAULT_APP_URL:-https://localhost}
     restart: unless-stopped
     networks:
       - schloss-net
