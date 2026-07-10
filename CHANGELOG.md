@@ -28,6 +28,11 @@ fit best; add a new section if none fits.
   `VITE_ALLOWED_RETURN_ORIGINS`/`VITE_DEFAULT_APP_URL` to `https://` - tor's
   gateway auto-upgrades everything to HTTPS, so the old `http://` defaults
   failed the return_to allowlist for anyone running the real stack.
+- Renamed docker-compose.yml's outer `ALLOWED_ORIGINS` substitution
+  variable to `SCHLUSSEL_ALLOWED_ORIGINS` - it was silently colliding with
+  kuvert-api's own `ALLOWED_ORIGINS` default when tor's compose file
+  includes both under one shared `.env`. Container-internal env var name
+  is unchanged.
 
 ## Docs
 - README, AGPL-3.0 LICENSE, CONTRIBUTING.md.
