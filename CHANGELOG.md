@@ -30,3 +30,6 @@ fit best; add a new section if none fits.
 - License/CI badges, a link to the Hof meta-repo, fixed gateway repo URL
   casing after its rename to lowercase.
 - Wrote the gateway's project name lowercase ("tor") everywhere in prose.
+- Added CODE_OF_CONDUCT.md, SECURITY.md, issue templates, and a pull
+  request template. Fixed a stale README line still describing the old
+  fragment-based token handoff.

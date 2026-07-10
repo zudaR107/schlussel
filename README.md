@@ -22,8 +22,10 @@ word related to what it does:
   service
 
 Every other service redirects an unauthenticated visitor's browser here to sign in.
-Schlüssel issues a short-lived RS256-signed JWT (returned via a URL fragment, never a
-query string, so it doesn't end up in server logs) plus a long-lived refresh token in an
+Schlüssel hands back a short-lived RS256-signed JWT via an OAuth2 Authorization Code +
+PKCE exchange — the login page redirects with a one-time code, never the token itself,
+and the caller trades that code for the real access token in a POST response body, so
+the token never travels through a URL at all. A long-lived refresh token is set in an
 httpOnly cookie scoped to whichever frontend the visitor signed in from. Other services
 verify the JWT themselves against Schlüssel's public key, published at
 `/.well-known/jwks.json` — no shared secret, no synchronous call back to Schlüssel on
