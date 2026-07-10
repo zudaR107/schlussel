@@ -20,6 +20,12 @@ fit best; add a new section if none fits.
   every subdomain behind the gateway - a session started on one service
   now carries over to the others instead of forcing a re-login.
 
+## UI
+- Added a header (brand mark linking back to schloss) and footer to the
+  login/register pages and the return_to error page - previously bare
+  form cards with no chrome connecting them to the rest of the platform,
+  matching schloss's Header/Footer component structure.
+
 ## Infrastructure
 - CI (tests + lint) on every push/PR.
 - Docker Compose networking on a shared `schloss-net`.
