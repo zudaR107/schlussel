@@ -13,6 +13,14 @@ const REFRESH_TOKEN_MAX_AGE = 60 * 60 * 24 * 7 // 7 days in seconds
 const COOKIE_NAME = 'schloss_refresh'
 const AUTH_CODE_MAX_AGE = 60 // seconds
 
+// Unset by default (host-only cookie, today's behavior) - set to the
+// platform's apex domain (e.g. "localhost" or "example.com") so the
+// refresh cookie is valid across every subdomain behind the gateway
+// (schloss/auth/kuvert), not just whichever one happened to proxy the
+// /auth/token or /auth/refresh call that set it. Without this, a session
+// started on one service doesn't carry over to another.
+const COOKIE_DOMAIN = process.env.COOKIE_DOMAIN
+
 function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex')
 }
@@ -229,16 +237,18 @@ authRouter.get('/me', async (c) => {
 
 // Helpers — cookie management without external deps
 function setCookieHeader(c: Parameters<typeof clearCookie>[0], token: string) {
+  const domain = COOKIE_DOMAIN ? `; Domain=${COOKIE_DOMAIN}` : ''
   c.header(
     'Set-Cookie',
-    `${COOKIE_NAME}=${token}; HttpOnly; Path=/; Max-Age=${REFRESH_TOKEN_MAX_AGE}; SameSite=Strict; Secure`,
+    `${COOKIE_NAME}=${token}; HttpOnly; Path=/; Max-Age=${REFRESH_TOKEN_MAX_AGE}; SameSite=Strict; Secure${domain}`,
   )
 }
 
 function clearCookie(c: { header: (name: string, value: string) => void }) {
+  const domain = COOKIE_DOMAIN ? `; Domain=${COOKIE_DOMAIN}` : ''
   c.header(
     'Set-Cookie',
-    `${COOKIE_NAME}=; HttpOnly; Path=/; Max-Age=0; SameSite=Strict; Secure`,
+    `${COOKIE_NAME}=; HttpOnly; Path=/; Max-Age=0; SameSite=Strict; Secure${domain}`,
   )
 }
 

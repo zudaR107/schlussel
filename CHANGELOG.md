@@ -16,6 +16,9 @@ fit best; add a new section if none fits.
   optionally issues a short-lived one-time code instead of a token, and a
   new `POST /auth/token` exchanges it (plus the PKCE verifier) for the
   real access token in a JSON response body.
+- Added optional `COOKIE_DOMAIN` to scope the refresh-token cookie across
+  every subdomain behind the gateway - a session started on one service
+  now carries over to the others instead of forcing a re-login.
 
 ## Infrastructure
 - CI (tests + lint) on every push/PR.
