@@ -25,6 +25,12 @@ fit best; add a new section if none fits.
   hosted login page tries this first and only shows the credentials form
   if it fails - a session started on one service now carries over to the
   others without ever sharing a cookie across subdomains.
+- Restore the stored theme before first paint (a synchronous inline
+  script in index.html's `<head>`, not just after the JS bundle mounts)
+  and render a themed blank div instead of nothing while the login page
+  checks for an existing session - reduces the flash during the SSO
+  silent-reauth redirect chain, which loads and unloads this page within
+  a fraction of a second.
 
 ## UI
 - Added a header (brand mark linking back to schloss) and footer to the

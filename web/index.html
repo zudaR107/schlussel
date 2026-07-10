@@ -5,6 +5,20 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Schlüssel</title>
+    <!-- Restores the stored theme before first paint, not just after the
+         JS bundle mounts - without this, every page load briefly flashes
+         the default light theme first. Same shared "schloss-theme"
+         localStorage key as schloss/kuvert (see src/lib/theme.ts). Most
+         visible during the SSO silent-reauth redirect chain, where this
+         page loads and unloads within a fraction of a second. -->
+    <script>
+      (function () {
+        try {
+          var theme = localStorage.getItem('schloss-theme')
+          if (theme) document.documentElement.setAttribute('data-theme', theme)
+        } catch (e) {}
+      })()
+    </script>
   </head>
   <body>
     <div id="root"></div>

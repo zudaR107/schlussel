@@ -68,10 +68,11 @@ export function LoginPage() {
     return <ErrorPage message="Адрес, на который нужно вернуться после входа, не входит в список разрешённых." />
   }
 
-  // Still checking for an existing session - render nothing rather than
-  // flash the credentials form before a silent redirect might fire.
+  // Still checking for an existing session - render a themed blank div
+  // rather than flash the credentials form before a silent redirect might
+  // fire, or an unthemed white background before that.
   if (checkingSession) {
-    return null
+    return <div style={{ minHeight: '100vh', background: 'var(--bg-base)' }} />
   }
 
   async function handleSubmit(e: React.FormEvent) {
