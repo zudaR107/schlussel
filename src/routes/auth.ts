@@ -13,14 +13,6 @@ const REFRESH_TOKEN_MAX_AGE = 60 * 60 * 24 * 7 // 7 days in seconds
 const COOKIE_NAME = 'schloss_refresh'
 const AUTH_CODE_MAX_AGE = 60 // seconds
 
-// Unset by default (host-only cookie, today's behavior) - set to the
-// platform's apex domain (e.g. "localhost" or "example.com") so the
-// refresh cookie is valid across every subdomain behind the gateway
-// (schloss/auth/kuvert), not just whichever one happened to proxy the
-// /auth/token or /auth/refresh call that set it. Without this, a session
-// started on one service doesn't carry over to another.
-const COOKIE_DOMAIN = process.env.COOKIE_DOMAIN
-
 function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex')
 }
@@ -52,8 +44,38 @@ const tokenSchema = z.object({
   codeVerifier: z.string().regex(/^[A-Za-z0-9_-]{43,128}$/),
 })
 
-// Issues a real access/refresh token pair for a user and sets the refresh
-// cookie - shared by the no-PKCE /login branch and the /token exchange.
+// Optional body for POST /refresh - lets schlussel's own login page check
+// for an existing session before ever showing the credentials form (see
+// the /refresh handler below). Every existing caller sends no body at
+// all, so this must stay optional and not break that.
+const refreshSchema = z
+  .object({
+    codeChallenge: codeChallengeSchema.optional(),
+    codeChallengeMethod: z.literal('S256').optional(),
+  })
+  .refine(
+    (v) => (v.codeChallenge === undefined) === (v.codeChallengeMethod === undefined),
+    { message: 'codeChallenge and codeChallengeMethod must be given together' },
+  )
+
+// Creates a new refresh token, stores it, and sets it as the httpOnly
+// cookie - the session-establishing side effect shared by every path
+// below that authenticates a user.
+async function establishSession(c: Parameters<typeof setCookieHeader>[0], userId: string): Promise<void> {
+  const refreshToken = await signRefreshToken(userId)
+  await db.insert(refreshTokens).values({
+    id: createId(),
+    userId,
+    tokenHash: hashToken(refreshToken),
+    expiresAt: new Date(Date.now() + REFRESH_TOKEN_MAX_AGE * 1000),
+    createdAt: new Date(),
+  })
+  setCookieHeader(c, refreshToken)
+}
+
+// Issues a real access token plus a fresh session cookie - shared by the
+// no-PKCE /login branch and the /token exchange, both of which hand the
+// access token straight back in the response body.
 async function issueSession(c: Parameters<typeof setCookieHeader>[0], user: User) {
   const accessToken = await signAccessToken({
     sub: user.id,
@@ -61,22 +83,29 @@ async function issueSession(c: Parameters<typeof setCookieHeader>[0], user: User
     name: user.name,
     role: user.role,
   })
-  const refreshToken = await signRefreshToken(user.id)
-
-  await db.insert(refreshTokens).values({
-    id: createId(),
-    userId: user.id,
-    tokenHash: hashToken(refreshToken),
-    expiresAt: new Date(Date.now() + REFRESH_TOKEN_MAX_AGE * 1000),
-    createdAt: new Date(),
-  })
-
-  setCookieHeader(c, refreshToken)
+  await establishSession(c, user.id)
 
   return {
     accessToken,
     user: { id: user.id, email: user.email, name: user.name, role: user.role },
   }
+}
+
+// Issues a short-lived one-time PKCE code for a user - shared by the
+// password-verified /login branch and the cookie-verified silent-reauth
+// branch of /refresh below, so a token never has to travel through a
+// redirect URL in either case.
+async function issueAuthCode(userId: string, codeChallenge: string): Promise<string> {
+  const code = randomBytes(32).toString('base64url')
+  await db.insert(authCodes).values({
+    id: createId(),
+    userId,
+    codeHash: hashToken(code),
+    codeChallenge,
+    expiresAt: new Date(Date.now() + AUTH_CODE_MAX_AGE * 1000),
+    createdAt: new Date(),
+  })
+  return code
 }
 
 export const authRouter = new Hono()
@@ -118,16 +147,15 @@ authRouter.post('/login', zValidator('json', loginSchema), async (c) => {
   // PKCE handoff: issue a short-lived one-time code instead of a real
   // token, so the token itself never has to travel through a URL - the
   // caller redeems it at POST /auth/token with the matching verifier.
+  // Also establishes a real session here: this endpoint is only ever
+  // called from schlussel's own hosted login page (never proxied through
+  // another service's origin), so the cookie lands on schlussel's own
+  // origin and stays there - no cross-subdomain Domain attribute needed.
+  // That's what lets the silent-reauth branch of /refresh below skip the
+  // credentials form entirely the next time any app redirects here.
   if (codeChallenge) {
-    const code = randomBytes(32).toString('base64url')
-    await db.insert(authCodes).values({
-      id: createId(),
-      userId: user.id,
-      codeHash: hashToken(code),
-      codeChallenge,
-      expiresAt: new Date(Date.now() + AUTH_CODE_MAX_AGE * 1000),
-      createdAt: new Date(),
-    })
+    await establishSession(c, user.id)
+    const code = await issueAuthCode(user.id, codeChallenge)
     return c.json({ code })
   }
 
@@ -187,8 +215,28 @@ authRouter.post('/refresh', async (c) => {
   const user = await db.select().from(users).where(eq(users.id, payload.sub)).get()
   if (!user) return c.json({ error: 'User not found' }, 401)
 
+  // Optional silent-reauth: schlussel's own login page calls this with a
+  // codeChallenge to check for an existing session (this same cookie,
+  // always same-origin there) before ever showing the credentials form.
+  // Every other existing caller sends no body, which parses to {} here
+  // and falls through to today's plain-refresh behavior unchanged.
+  let body: unknown
+  try {
+    body = await c.req.json()
+  } catch {
+    body = {}
+  }
+  const parsed = refreshSchema.safeParse(body)
+  if (!parsed.success) return c.json({ error: 'Invalid request' }, 400)
+
   // Rotate refresh token
   await db.delete(refreshTokens).where(eq(refreshTokens.tokenHash, tokenHash))
+
+  if (parsed.data.codeChallenge) {
+    await establishSession(c, user.id)
+    const code = await issueAuthCode(user.id, parsed.data.codeChallenge)
+    return c.json({ code })
+  }
 
   const newAccessToken = await signAccessToken({
     sub: user.id,
@@ -196,17 +244,7 @@ authRouter.post('/refresh', async (c) => {
     name: user.name,
     role: user.role,
   })
-  const newRefreshToken = await signRefreshToken(user.id)
-
-  await db.insert(refreshTokens).values({
-    id: createId(),
-    userId: user.id,
-    tokenHash: hashToken(newRefreshToken),
-    expiresAt: new Date(Date.now() + REFRESH_TOKEN_MAX_AGE * 1000),
-    createdAt: new Date(),
-  })
-
-  setCookieHeader(c, newRefreshToken)
+  await establishSession(c, user.id)
 
   return c.json({ accessToken: newAccessToken })
 })
@@ -237,18 +275,16 @@ authRouter.get('/me', async (c) => {
 
 // Helpers — cookie management without external deps
 function setCookieHeader(c: Parameters<typeof clearCookie>[0], token: string) {
-  const domain = COOKIE_DOMAIN ? `; Domain=${COOKIE_DOMAIN}` : ''
   c.header(
     'Set-Cookie',
-    `${COOKIE_NAME}=${token}; HttpOnly; Path=/; Max-Age=${REFRESH_TOKEN_MAX_AGE}; SameSite=Strict; Secure${domain}`,
+    `${COOKIE_NAME}=${token}; HttpOnly; Path=/; Max-Age=${REFRESH_TOKEN_MAX_AGE}; SameSite=Strict; Secure`,
   )
 }
 
 function clearCookie(c: { header: (name: string, value: string) => void }) {
-  const domain = COOKIE_DOMAIN ? `; Domain=${COOKIE_DOMAIN}` : ''
   c.header(
     'Set-Cookie',
-    `${COOKIE_NAME}=; HttpOnly; Path=/; Max-Age=0; SameSite=Strict; Secure${domain}`,
+    `${COOKIE_NAME}=; HttpOnly; Path=/; Max-Age=0; SameSite=Strict; Secure`,
   )
 }
 

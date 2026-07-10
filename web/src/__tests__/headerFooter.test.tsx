@@ -30,7 +30,19 @@ async function setLocation(pathname: string, search: string) {
 const CODE_CHALLENGE = 'C'.repeat(43)
 const PKCE_QS = `&code_challenge=${CODE_CHALLENGE}&code_challenge_method=S256`
 
+// LoginPage performs a silent `fetch('/auth/refresh', ...)` re-auth check on
+// mount before ever showing the form; stub it to fail (no session) so these
+// Header/Footer assertions can await the settled fallback-to-form state.
+const mockFetch = vi.fn()
+
 beforeEach(() => {
+  mockFetch.mockReset()
+  mockFetch.mockResolvedValue({
+    ok: false,
+    status: 401,
+    json: async () => ({ error: 'no session' }),
+  })
+  vi.stubGlobal('fetch', mockFetch)
   localStorage.clear()
 })
 
@@ -59,6 +71,7 @@ describe('Header + Footer — LoginPage (valid return_to/code_challenge)', () =>
     const { LoginPage } = await setLocation('/login', `?return_to=https://kuvert.test/callback${PKCE_QS}`)
     render(<LoginPage />)
 
+    await screen.findByPlaceholderText(/example/i)
     expectHeaderLink('https://schloss.example.com')
     vi.unstubAllEnvs()
   })
@@ -70,6 +83,7 @@ describe('Header + Footer — LoginPage (valid return_to/code_challenge)', () =>
 
     // Matches the same hardcoded fallback used by the redirect logic elsewhere
     // in this suite (see LoginPage.test.tsx "no return_to" tests).
+    await screen.findByPlaceholderText(/example/i)
     expectHeaderLink('http://localhost:3000')
   })
 
@@ -78,6 +92,7 @@ describe('Header + Footer — LoginPage (valid return_to/code_challenge)', () =>
     const { LoginPage } = await setLocation('/login', `?return_to=https://kuvert.test/callback${PKCE_QS}`)
     render(<LoginPage />)
 
+    await screen.findByPlaceholderText(/example/i)
     expectFooter()
     vi.unstubAllEnvs()
   })
@@ -87,6 +102,7 @@ describe('Header + Footer — LoginPage (valid return_to/code_challenge)', () =>
     const { LoginPage } = await setLocation('/login', `?return_to=https://kuvert.test/callback${PKCE_QS}`)
     render(<LoginPage />)
 
+    await screen.findByRole('heading', { name: 'Войти' })
     expect(screen.getAllByRole('heading', { name: 'Войти' })).toHaveLength(1)
     vi.unstubAllEnvs()
   })

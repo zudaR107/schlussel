@@ -16,9 +16,15 @@ fit best; add a new section if none fits.
   optionally issues a short-lived one-time code instead of a token, and a
   new `POST /auth/token` exchanges it (plus the PKCE verifier) for the
   real access token in a JSON response body.
-- Added optional `COOKIE_DOMAIN` to scope the refresh-token cookie across
-  every subdomain behind the gateway - a session started on one service
-  now carries over to the others instead of forcing a re-login.
+- Replaced an earlier `COOKIE_DOMAIN` attempt (didn't work - `localhost`
+  has no embedded dot, so browsers won't share a Domain-scoped cookie
+  across its subdomains, the same rule that stops a site setting a cookie
+  for `.com`) with silent re-authentication: `/auth/login`'s PKCE branch
+  now also establishes a same-origin session, and `/auth/refresh` can
+  issue a PKCE code from that session instead of an access token. The
+  hosted login page tries this first and only shows the credentials form
+  if it fails - a session started on one service now carries over to the
+  others without ever sharing a cookie across subdomains.
 
 ## UI
 - Added a header (brand mark linking back to schloss) and footer to the

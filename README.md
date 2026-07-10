@@ -65,7 +65,6 @@ See `.env.example` for the API. The important ones:
 | `KEYS_DIR` | Where the RS256 signing keypair is generated/stored on first run |
 | `JWT_ISSUER` | Must match what every other service expects as the token issuer |
 | `ALLOWED_ORIGINS` | Comma-separated CORS allowlist |
-| `COOKIE_DOMAIN` | Optional. Scopes the refresh-token cookie to this domain (e.g. `localhost` or `example.com`) so a session carries over between subdomains behind the gateway instead of being host-only to whichever one issued it. Unset by default. |
 
 `web/` reads two build-time variables (see `web/Dockerfile`): `VITE_ALLOWED_RETURN_ORIGINS`,
 a comma-separated allowlist of origins the hosted login page is allowed to redirect back

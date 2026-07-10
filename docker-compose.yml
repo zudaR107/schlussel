@@ -27,11 +27,6 @@ services:
       # name is still plain ALLOWED_ORIGINS below - only the outer name
       # changed.
       - ALLOWED_ORIGINS=${SCHLUSSEL_ALLOWED_ORIGINS:-https://localhost,https://auth.localhost}
-      # Reuses tor's DOMAIN var on purpose (unlike ALLOWED_ORIGINS above) -
-      # the refresh-token cookie must share the same apex domain tor
-      # routes subdomains under, so a session started on one service
-      # carries over to the others instead of forcing a re-login.
-      - COOKIE_DOMAIN=${DOMAIN:-localhost}
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:4000/health"]
       interval: 30s
