@@ -145,7 +145,7 @@ describe('POST /auth/login — PKCE', () => {
     expect(body['accessToken']).toBeUndefined()
   })
 
-  it('with both codeChallenge and codeChallengeMethod: sets no Set-Cookie header at all', async () => {
+  it('with both codeChallenge and codeChallengeMethod: also sets the schloss_refresh session cookie (SSO)', async () => {
     const res = await post('/auth/login', {
       email: 'alice@example.com',
       password: 'password123',
@@ -153,7 +153,9 @@ describe('POST /auth/login — PKCE', () => {
       codeChallengeMethod: 'S256',
     })
     expect(res.status).toBe(200)
-    expect(res.headers.getSetCookie()).toEqual([])
+    const cookies = res.headers.getSetCookie()
+    expect(cookies.length).toBeGreaterThan(0)
+    expect(cookies.some((c) => c.startsWith('schloss_refresh='))).toBe(true)
   })
 
   it('with both codeChallenge and codeChallengeMethod: response has no "user" field required, but must not leak accessToken/refresh material', async () => {
@@ -385,6 +387,199 @@ describe('POST /auth/token', () => {
   it('malformed body: completely empty body returns 400', async () => {
     const res = await post('/auth/token', {})
     expect(res.status).toBe(400)
+  })
+})
+
+// ── POST /auth/refresh — codeChallenge extension (silent re-auth / SSO) ────
+
+describe('POST /auth/refresh — codeChallenge extension', () => {
+  let refreshCookie: string
+
+  beforeEach(async () => {
+    await registerUser()
+    const loginRes = await post('/auth/login', {
+      email: 'alice@example.com',
+      password: 'password123',
+    })
+    refreshCookie = getCookieValue(loginRes, 'schloss_refresh') ?? ''
+    expect(refreshCookie).not.toBe('')
+    // jose uses second-precision iat; ensure a rotated token gets a
+    // different iat (and thus a different signature) from the original.
+    await new Promise((r) => setTimeout(r, 1100))
+  })
+
+  function refreshWithCookie(body: unknown | undefined, cookie: string) {
+    return app.request('/auth/refresh', {
+      method: 'POST',
+      headers: {
+        ...(cookie ? { Cookie: `schloss_refresh=${cookie}` } : {}),
+        ...(body !== undefined ? JSON_HEADERS : {}),
+      },
+      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+    })
+  }
+
+  it('valid codeChallenge + valid refresh cookie: returns 200 with { code } (no accessToken), and rotates the session cookie', async () => {
+    const verifier = generateVerifier()
+    const challenge = deriveChallenge(verifier)
+
+    const res = await refreshWithCookie(
+      { codeChallenge: challenge, codeChallengeMethod: 'S256' },
+      refreshCookie,
+    )
+    expect(res.status).toBe(200)
+    const body = await res.json() as Record<string, unknown>
+    expect(typeof body['code']).toBe('string')
+    expect((body['code'] as string).length).toBeGreaterThan(0)
+    expect(body['accessToken']).toBeUndefined()
+
+    const newCookie = getCookieValue(res, 'schloss_refresh')
+    expect(newCookie).not.toBeNull()
+    expect(newCookie).not.toBe(refreshCookie)
+  })
+
+  it('the issued code is redeemable via /auth/token for the same user the cookie belonged to', async () => {
+    const verifier = generateVerifier()
+    const challenge = deriveChallenge(verifier)
+
+    const refreshRes = await refreshWithCookie(
+      { codeChallenge: challenge, codeChallengeMethod: 'S256' },
+      refreshCookie,
+    )
+    expect(refreshRes.status).toBe(200)
+    const { code } = await refreshRes.json() as { code: string }
+
+    const tokenRes = await post('/auth/token', { code, codeVerifier: verifier })
+    expect(tokenRes.status).toBe(200)
+    const body = await tokenRes.json() as Record<string, unknown>
+    expect(typeof body['accessToken']).toBe('string')
+    const user = body['user'] as Record<string, unknown>
+    expect(user['email']).toBe('alice@example.com')
+    expect(user['name']).toBe('Alice')
+  })
+
+  it('the issued code is bound to the correct user, distinct from another logged-in user', async () => {
+    await registerUser('bob@example.com', 'bobpassword', 'Bob')
+    const bobLogin = await post('/auth/login', {
+      email: 'bob@example.com',
+      password: 'bobpassword',
+    })
+    const bobCookie = getCookieValue(bobLogin, 'schloss_refresh') ?? ''
+
+    const verifier = generateVerifier()
+    const challenge = deriveChallenge(verifier)
+    const refreshRes = await refreshWithCookie(
+      { codeChallenge: challenge, codeChallengeMethod: 'S256' },
+      bobCookie,
+    )
+    expect(refreshRes.status).toBe(200)
+    const { code } = await refreshRes.json() as { code: string }
+
+    const tokenRes = await post('/auth/token', { code, codeVerifier: verifier })
+    expect(tokenRes.status).toBe(200)
+    const body = await tokenRes.json() as Record<string, unknown>
+    const user = body['user'] as Record<string, unknown>
+    expect(user['email']).toBe('bob@example.com')
+  })
+
+  it('code issued via /auth/refresh is single-use, just like a login-issued code', async () => {
+    const verifier = generateVerifier()
+    const challenge = deriveChallenge(verifier)
+    const refreshRes = await refreshWithCookie(
+      { codeChallenge: challenge, codeChallengeMethod: 'S256' },
+      refreshCookie,
+    )
+    const { code } = await refreshRes.json() as { code: string }
+
+    const first = await post('/auth/token', { code, codeVerifier: verifier })
+    expect(first.status).toBe(200)
+    const second = await post('/auth/token', { code, codeVerifier: verifier })
+    expect(second.status).toBe(400)
+  })
+
+  it('codeChallenge given but no refresh cookie at all: returns 401 and issues no code', async () => {
+    const res = await refreshWithCookie(
+      { codeChallenge: fixtureCodeChallenge(), codeChallengeMethod: 'S256' },
+      '',
+    )
+    expect(res.status).toBe(401)
+    const body = await res.json() as Record<string, unknown>
+    expect(body['code']).toBeUndefined()
+  })
+
+  it('codeChallenge given with an invalid/garbage refresh cookie: returns 401 and issues no code', async () => {
+    const res = await refreshWithCookie(
+      { codeChallenge: fixtureCodeChallenge(), codeChallengeMethod: 'S256' },
+      'totallyinvalidtoken',
+    )
+    expect(res.status).toBe(401)
+    const body = await res.json() as Record<string, unknown>
+    expect(body['code']).toBeUndefined()
+  })
+
+  it('malformed body: codeChallenge without codeChallengeMethod returns 400 and does not touch the cookie', async () => {
+    const res = await refreshWithCookie({ codeChallenge: fixtureCodeChallenge() }, refreshCookie)
+    expect(res.status).toBe(400)
+    expect(res.headers.getSetCookie()).toEqual([])
+  })
+
+  it('malformed body: codeChallengeMethod without codeChallenge returns 400 and does not touch the cookie', async () => {
+    const res = await refreshWithCookie({ codeChallengeMethod: 'S256' }, refreshCookie)
+    expect(res.status).toBe(400)
+    expect(res.headers.getSetCookie()).toEqual([])
+  })
+
+  it('malformed body: codeChallengeMethod other than "S256" returns 400 and does not touch the cookie', async () => {
+    const res = await refreshWithCookie(
+      { codeChallenge: fixtureCodeChallenge(), codeChallengeMethod: 'plain' },
+      refreshCookie,
+    )
+    expect(res.status).toBe(400)
+    expect(res.headers.getSetCookie()).toEqual([])
+  })
+
+  it('malformed body: codeChallenge shorter than 43 characters returns 400 and does not touch the cookie', async () => {
+    const res = await refreshWithCookie(
+      { codeChallenge: fixtureCodeChallenge().slice(0, 30), codeChallengeMethod: 'S256' },
+      refreshCookie,
+    )
+    expect(res.status).toBe(400)
+    expect(res.headers.getSetCookie()).toEqual([])
+  })
+
+  it('malformed body: codeChallenge with invalid base64url characters returns 400 and does not touch the cookie', async () => {
+    const bogus = 'a'.repeat(40) + '+/='
+    expect(bogus.length).toBe(43)
+    const res = await refreshWithCookie(
+      { codeChallenge: bogus, codeChallengeMethod: 'S256' },
+      refreshCookie,
+    )
+    expect(res.status).toBe(400)
+    expect(res.headers.getSetCookie()).toEqual([])
+  })
+
+  it('regression: no body at all still behaves as a plain refresh (200, { accessToken }, cookie rotated)', async () => {
+    const res = await refreshWithCookie(undefined, refreshCookie)
+    expect(res.status).toBe(200)
+    const body = await res.json() as Record<string, unknown>
+    expect(typeof body['accessToken']).toBe('string')
+    expect(body['code']).toBeUndefined()
+    const newCookie = getCookieValue(res, 'schloss_refresh')
+    expect(newCookie).not.toBeNull()
+    expect(newCookie).not.toBe(refreshCookie)
+  })
+
+  it('regression: an empty JSON body {} still behaves as a plain refresh (200, { accessToken })', async () => {
+    const res = await refreshWithCookie({}, refreshCookie)
+    expect(res.status).toBe(200)
+    const body = await res.json() as Record<string, unknown>
+    expect(typeof body['accessToken']).toBe('string')
+    expect(body['code']).toBeUndefined()
+  })
+
+  it('regression: plain refresh (no body) with no cookie still returns 401', async () => {
+    const res = await refreshWithCookie(undefined, '')
+    expect(res.status).toBe(401)
   })
 })
 

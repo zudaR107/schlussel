@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { login, ApiError } from '../../lib/api'
 import { readReturnTo, readCodeChallenge, redirectWithCode, redirectToDefaultApp, withReturnTo } from '../../lib/returnTo'
 import { ErrorPage } from './ErrorPage'
@@ -13,6 +13,48 @@ export function LoginPage() {
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+  const [checkingSession, setCheckingSession] = useState(true)
+
+  const returnToUrl = returnTo.present && returnTo.valid ? returnTo.url : ''
+  const challenge = codeChallenge.present ? codeChallenge.codeChallenge : ''
+  const canSilentAuth = returnTo.present && returnTo.valid && codeChallenge.present
+
+  // Before ever showing the credentials form, check whether this browser
+  // already has a valid schlussel session (the httpOnly refresh cookie -
+  // always same-origin here, since this page is the only thing that ever
+  // calls POST /auth/login, so the cookie is always scoped to schlussel's
+  // own origin and never needs sharing across subdomains). If so, silently
+  // complete the PKCE handoff instead of making the visitor log in again -
+  // the same "already signed in, redirect straight back" flow every real
+  // SSO provider uses.
+  useEffect(() => {
+    if (!canSilentAuth) {
+      setCheckingSession(false)
+      return
+    }
+    let cancelled = false
+    fetch('/auth/refresh', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ codeChallenge: challenge, codeChallengeMethod: 'S256' }),
+    })
+      .then((res) => (res.ok ? (res.json() as Promise<{ code: string }>) : null))
+      .then((data) => {
+        if (cancelled) return
+        if (data?.code) {
+          redirectWithCode(returnToUrl, data.code)
+        } else {
+          setCheckingSession(false)
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setCheckingSession(false)
+      })
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   // No return_to (or no code_challenge) means this page was reached by
   // typing the URL directly rather than via an external redirect - send
@@ -26,8 +68,11 @@ export function LoginPage() {
     return <ErrorPage message="Адрес, на который нужно вернуться после входа, не входит в список разрешённых." />
   }
 
-  const returnToUrl = returnTo.url
-  const challenge = codeChallenge.codeChallenge
+  // Still checking for an existing session - render nothing rather than
+  // flash the credentials form before a silent redirect might fire.
+  if (checkingSession) {
+    return null
+  }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()

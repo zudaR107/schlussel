@@ -30,8 +30,39 @@ async function setLocation(search: string) {
 const CODE_CHALLENGE = 'A'.repeat(43)
 const PKCE_QS = `&code_challenge=${CODE_CHALLENGE}&code_challenge_method=S256`
 
+// LoginPage now makes a raw `fetch('/auth/refresh', ...)` silent-reauth
+// check on mount, separate from the `login`/`register` calls mocked above
+// (those go through ../lib/api, not raw fetch). We stub the global fetch
+// so every test controls that check explicitly.
+const mockFetch = vi.fn()
+
+function mockRefreshFails(status = 401) {
+  mockFetch.mockResolvedValue({
+    ok: false,
+    status,
+    json: async () => ({ error: 'no session' }),
+  })
+}
+
+function mockRefreshSucceeds(code: string) {
+  mockFetch.mockResolvedValue({
+    ok: true,
+    status: 200,
+    json: async () => ({ code }),
+  })
+}
+
+function mockRefreshRejects(error: unknown = new TypeError('Failed to fetch')) {
+  mockFetch.mockRejectedValue(error)
+}
+
 beforeEach(() => {
   mockLogin.mockReset()
+  mockFetch.mockReset()
+  // Default: no active session anywhere else, so the form falls back to
+  // rendering normally unless a test opts into a different outcome.
+  mockRefreshFails()
+  vi.stubGlobal('fetch', mockFetch)
   localStorage.clear()
 })
 
@@ -72,7 +103,7 @@ describe('LoginPage — valid return_to', () => {
     const user = userEvent.setup()
     render(<LoginPage />)
 
-    await user.type(screen.getByPlaceholderText(/example/i), 'a@a.com')
+    await user.type(await screen.findByPlaceholderText(/example/i), 'a@a.com')
     await user.type(document.querySelector('input[type="password"]') as Element, 'password1')
     await user.click(screen.getByRole('button', { name: 'Войти' }))
 
@@ -91,7 +122,7 @@ describe('LoginPage — valid return_to', () => {
     const user = userEvent.setup()
     render(<LoginPage />)
 
-    await user.type(screen.getByPlaceholderText(/example/i), 'a@a.com')
+    await user.type(await screen.findByPlaceholderText(/example/i), 'a@a.com')
     await user.type(document.querySelector('input[type="password"]') as Element, 'password1')
     await user.click(screen.getByRole('button', { name: 'Войти' }))
 
@@ -108,7 +139,7 @@ describe('LoginPage — valid return_to', () => {
     const user = userEvent.setup()
     render(<LoginPage />)
 
-    await user.type(screen.getByPlaceholderText(/example/i), 'a@a.com')
+    await user.type(await screen.findByPlaceholderText(/example/i), 'a@a.com')
     await user.type(document.querySelector('input[type="password"]') as Element, 'password1')
     await user.click(screen.getByRole('button', { name: 'Войти' }))
 
@@ -128,11 +159,83 @@ describe('LoginPage — valid return_to', () => {
     const user = userEvent.setup()
     render(<LoginPage />)
 
-    await user.type(screen.getByPlaceholderText(/example/i), 'bad@user.com')
+    await user.type(await screen.findByPlaceholderText(/example/i), 'bad@user.com')
     await user.type(document.querySelector('input[type="password"]') as Element, 'wrong')
     await user.click(screen.getByRole('button', { name: 'Войти' }))
 
     await screen.findByText('Неверный email или пароль')
+    vi.unstubAllEnvs()
+  })
+})
+
+describe('LoginPage — silent re-authentication', () => {
+  it('posts to /auth/refresh with the code_challenge and codeChallengeMethod S256 on mount', async () => {
+    vi.stubEnv('VITE_ALLOWED_RETURN_ORIGINS', 'https://kuvert.test')
+    const { LoginPage } = await setLocation(`?return_to=https://kuvert.test/callback${PKCE_QS}`)
+    render(<LoginPage />)
+
+    await waitFor(() => expect(mockFetch).toHaveBeenCalled())
+    const [url, init] = mockFetch.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('/auth/refresh')
+    expect(init).toMatchObject({ method: 'POST' })
+    expect(JSON.parse(init.body as string)).toEqual({
+      codeChallenge: CODE_CHALLENGE,
+      codeChallengeMethod: 'S256',
+    })
+    vi.unstubAllEnvs()
+  })
+
+  it('redirects immediately with the returned code and never renders the form when /auth/refresh succeeds (no existing query on return_to)', async () => {
+    vi.stubEnv('VITE_ALLOWED_RETURN_ORIGINS', 'https://kuvert.test')
+    mockRefreshSucceeds('silent-code')
+    const { LoginPage } = await setLocation(`?return_to=https://kuvert.test/callback${PKCE_QS}`)
+    render(<LoginPage />)
+
+    await waitFor(() => expect(window.location.href).toBe('https://kuvert.test/callback?code=silent-code'))
+    expect(screen.queryByPlaceholderText(/example/i)).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Войти' })).not.toBeInTheDocument()
+    expect(mockLogin).not.toHaveBeenCalled()
+    vi.unstubAllEnvs()
+  })
+
+  it('redirects with &code=<value> appended when /auth/refresh succeeds and return_to already has a query string', async () => {
+    vi.stubEnv('VITE_ALLOWED_RETURN_ORIGINS', 'https://kuvert.test')
+    mockRefreshSucceeds('silent-code')
+    const { LoginPage } = await setLocation(
+      `?return_to=${encodeURIComponent('https://kuvert.test/callback?next=%2Fbudget')}${PKCE_QS}`,
+    )
+    render(<LoginPage />)
+
+    await waitFor(() =>
+      expect(window.location.href).toBe('https://kuvert.test/callback?next=%2Fbudget&code=silent-code'),
+    )
+    expect(screen.queryByPlaceholderText(/example/i)).not.toBeInTheDocument()
+    vi.unstubAllEnvs()
+  })
+
+  it('falls back to rendering the credentials form when /auth/refresh resolves with a non-ok status (no session)', async () => {
+    vi.stubEnv('VITE_ALLOWED_RETURN_ORIGINS', 'https://kuvert.test')
+    mockRefreshFails(401)
+    const { LoginPage } = await setLocation(`?return_to=https://kuvert.test/callback${PKCE_QS}`)
+    render(<LoginPage />)
+
+    expect(await screen.findByPlaceholderText(/example/i)).toBeInTheDocument()
+    expect(document.querySelector('input[type="password"]')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Войти' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /зарегистрироваться/i })).toBeInTheDocument()
+    expect(window.location.href).toBe('')
+    vi.unstubAllEnvs()
+  })
+
+  it('falls back to rendering the credentials form when /auth/refresh rejects with a network error', async () => {
+    vi.stubEnv('VITE_ALLOWED_RETURN_ORIGINS', 'https://kuvert.test')
+    mockRefreshRejects(new TypeError('Failed to fetch'))
+    const { LoginPage } = await setLocation(`?return_to=https://kuvert.test/callback${PKCE_QS}`)
+    render(<LoginPage />)
+
+    expect(await screen.findByPlaceholderText(/example/i)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Войти' })).toBeInTheDocument()
+    expect(window.location.href).toBe('')
     vi.unstubAllEnvs()
   })
 })
@@ -190,7 +293,7 @@ describe('LoginPage — password visibility toggle', () => {
     const { LoginPage } = await setLocation(`?return_to=https://kuvert.test/callback${PKCE_QS}`)
     render(<LoginPage />)
 
-    expect(screen.getByRole('button', { name: 'Показать пароль' })).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: 'Показать пароль' })).toBeInTheDocument()
     vi.unstubAllEnvs()
   })
 
@@ -200,10 +303,11 @@ describe('LoginPage — password visibility toggle', () => {
     const user = userEvent.setup()
     render(<LoginPage />)
 
+    const toggleButton = await screen.findByRole('button', { name: 'Показать пароль' })
     const input = document.querySelector('#login-password') as HTMLInputElement
     expect(input).toHaveAttribute('type', 'password')
 
-    await user.click(screen.getByRole('button', { name: 'Показать пароль' }))
+    await user.click(toggleButton)
     expect(input).toHaveAttribute('type', 'text')
     expect(screen.getByRole('button', { name: 'Скрыть пароль' })).toBeInTheDocument()
 
@@ -219,6 +323,7 @@ describe('LoginPage — password visibility toggle', () => {
     const user = userEvent.setup()
     render(<LoginPage />)
 
+    await screen.findByRole('button', { name: 'Показать пароль' })
     const input = document.querySelector('#login-password') as HTMLInputElement
     await user.type(input, 'secret123')
     expect(input).toHaveValue('secret123')
@@ -237,7 +342,7 @@ describe('LoginPage — register link', () => {
     vi.stubEnv('VITE_ALLOWED_RETURN_ORIGINS', 'https://kuvert.test')
     const { LoginPage } = await setLocation(`?return_to=https%3A%2F%2Fkuvert.test%2Fcallback${PKCE_QS}`)
     render(<LoginPage />)
-    const link = screen.getByRole('link', { name: /зарегистрироваться/i })
+    const link = await screen.findByRole('link', { name: /зарегистрироваться/i })
     expect(link).toHaveAttribute(
       'href',
       `/register?return_to=https%3A%2F%2Fkuvert.test%2Fcallback&code_challenge=${CODE_CHALLENGE}&code_challenge_method=S256`,
