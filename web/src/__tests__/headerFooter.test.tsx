@@ -53,7 +53,10 @@ function findLinkWithHref(href: string): HTMLAnchorElement | undefined {
 function expectHeaderLink(defaultAppUrl: string) {
   const headerLink = findLinkWithHref(defaultAppUrl)
   expect(headerLink).toBeTruthy()
-  expect(headerLink).toHaveTextContent(/schlüssel/i)
+  // The shared Header no longer shows a visible brand-name text label next
+  // to the logo (an intentional design change - the logo icon is itself
+  // the home link) - the brand is now conveyed via a title tooltip instead.
+  expect(headerLink).toHaveAttribute('title', 'Schlüssel')
 }
 
 function expectFooter() {

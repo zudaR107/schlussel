@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { Field, Button } from '@zudar107/schloss-ui'
 import { register, ApiError } from '../../lib/api'
 import { readReturnTo, readCodeChallenge, redirectWithCode, redirectToDefaultApp, withReturnTo } from '../../lib/returnTo'
 import { ErrorPage } from './ErrorPage'
@@ -75,32 +76,26 @@ export function RegisterPage() {
           </div>
 
           <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '0.875rem' }}>
-            <div>
-              <label className="label" htmlFor="register-name">Имя</label>
-              <input
-                id="register-name"
-                className="input"
-                type="text"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                placeholder="Ваше имя"
-                required
-                autoComplete="name"
-              />
-            </div>
-            <div>
-              <label className="label" htmlFor="register-email">Email</label>
-              <input
-                id="register-email"
-                className="input"
-                type="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="name@example.com"
-                required
-                autoComplete="email"
-              />
-            </div>
+            <Field
+              id="register-name"
+              label="Имя"
+              type="text"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="Ваше имя"
+              required
+              autoComplete="name"
+            />
+            <Field
+              id="register-email"
+              label="Email"
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="name@example.com"
+              required
+              autoComplete="email"
+            />
             <PasswordField
               id="register-password"
               label="Пароль"
@@ -126,14 +121,14 @@ export function RegisterPage() {
               </div>
             )}
 
-            <button
+            <Button
               type="submit"
-              className="btn-primary"
+              variant="primary"
               disabled={loading}
               style={{ justifyContent: 'center', padding: '0.625rem', marginTop: '0.25rem', opacity: loading ? 0.7 : 1 }}
             >
               {loading ? 'Подождите…' : 'Зарегистрироваться'}
-            </button>
+            </Button>
           </form>
 
           <p style={{ margin: '1.25rem 0 0', textAlign: 'center', fontSize: '0.8125rem', color: 'var(--text-muted)' }}>
