@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { Field, Button } from '@zudar107/schloss-ui'
 import { login, ApiError } from '../../lib/api'
 import { readReturnTo, readCodeChallenge, redirectWithCode, redirectToDefaultApp, withReturnTo } from '../../lib/returnTo'
 import { ErrorPage } from './ErrorPage'
@@ -115,19 +116,16 @@ export function LoginPage() {
           </div>
 
           <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '0.875rem' }}>
-            <div>
-              <label className="label" htmlFor="login-email">Email</label>
-              <input
-                id="login-email"
-                className="input"
-                type="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="name@example.com"
-                required
-                autoComplete="email"
-              />
-            </div>
+            <Field
+              id="login-email"
+              label="Email"
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="name@example.com"
+              required
+              autoComplete="email"
+            />
             <PasswordField
               id="login-password"
               label="Пароль"
@@ -143,14 +141,14 @@ export function LoginPage() {
               </div>
             )}
 
-            <button
+            <Button
               type="submit"
-              className="btn-primary"
+              variant="primary"
               disabled={loading}
               style={{ justifyContent: 'center', padding: '0.625rem', marginTop: '0.25rem', opacity: loading ? 0.7 : 1 }}
             >
               {loading ? 'Подождите…' : 'Войти'}
-            </button>
+            </Button>
           </form>
 
           <p style={{ margin: '1.25rem 0 0', textAlign: 'center', fontSize: '0.8125rem', color: 'var(--text-muted)' }}>

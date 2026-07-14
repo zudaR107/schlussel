@@ -37,6 +37,17 @@ fit best; add a new section if none fits.
   login/register pages and the return_to error page - previously bare
   form cards with no chrome connecting them to the rest of the platform,
   matching schloss's Header/Footer component structure.
+- Adopted `@zudar107/schloss-ui`: Header/Footer now wrap the shared
+  package's versions (own brand mark, no more visible "Schlüssel" text
+  next to the logo - the logo icon is the home link, with the brand name
+  conveyed via a title tooltip instead), the name/email/password fields
+  on Login/RegisterPage use the shared `Field` component, and the submit
+  buttons use the shared `Button`. The password show/hide toggle now
+  layers on `Field`'s new `suffix` slot (added in schloss-ui v0.2.0)
+  instead of a bespoke absolutely-positioned button. Kept the platform's
+  original blue (`#3b82f6`) as schlussel's own accent, now an explicit
+  local override on top of the shared tokens instead of an accidental
+  shared default.
 
 ## Infrastructure
 - CI (tests + lint) on every push/PR.
