@@ -11,7 +11,15 @@
 # standalone or included from tor's.
 services:
   schlussel:
-    build: .
+    build:
+      context: .
+      # This is a pnpm workspace (schlussel at root, web/) - even though
+      # this image never uses @zudar107/schloss-ui itself, pnpm's
+      # frozen-lockfile install fetches every package in the lockfile to
+      # verify it, so it still needs GitHub Packages auth. NODE_AUTH_TOKEN
+      # must be set in the shell/`.env` running `docker compose build`.
+      secrets:
+        - npm_token
     restart: unless-stopped
     volumes:
       - schlussel-data:/data
@@ -42,6 +50,10 @@ services:
       args:
         VITE_ALLOWED_RETURN_ORIGINS: ${ALLOWED_RETURN_ORIGINS:-https://localhost,https://kuvert.localhost}
         VITE_DEFAULT_APP_URL: ${DEFAULT_APP_URL:-https://localhost}
+      # @zudar107/schloss-ui is on GitHub Packages - even though it's
+      # public, installing it still requires auth.
+      secrets:
+        - npm_token
     restart: unless-stopped
     networks:
       - schloss-net
@@ -49,6 +61,10 @@ services:
 volumes:
   schlussel-data:
     name: schlussel-data
+
+secrets:
+  npm_token:
+    environment: NODE_AUTH_TOKEN
 
 networks:
   schloss-net:
