@@ -2,11 +2,17 @@ FROM node:22-alpine AS builder
 
 # Pinned exactly, matching CI - "pnpm@latest" pulled whatever pnpm
 # published most recently, which broke the build outright once (a
-# self-installer bug in 11.12.0) and later added a stricter
-# node_modules check that aborts without a TTY (which a Docker build
-# never has), unrelated to any change in this repo.
+# self-installer bug in 11.12.0), unrelated to any change in this repo.
 RUN corepack enable && corepack prepare pnpm@11.7.0 --activate
 WORKDIR /app
+
+# pnpm runs a deps-status check before any "run"/"exec" script (e.g.
+# the "pnpm build" below) and, on a mismatch, tries to reinstall -
+# which needs interactive confirmation to purge node_modules, and a
+# Docker build has no TTY to give it. GitHub Actions sets CI=true for
+# every workflow automatically (which is why this never showed up
+# there), so it must be set explicitly here.
+ENV CI=true
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
 
