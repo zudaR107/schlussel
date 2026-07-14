@@ -1,6 +1,11 @@
 FROM node:22-alpine AS builder
 
-RUN corepack enable && corepack prepare pnpm@latest --activate
+# Pinned exactly, matching CI - "pnpm@latest" pulled whatever pnpm
+# published most recently, which broke the build outright once (a
+# self-installer bug in 11.12.0) and later added a stricter
+# node_modules check that aborts without a TTY (which a Docker build
+# never has), unrelated to any change in this repo.
+RUN corepack enable && corepack prepare pnpm@11.7.0 --activate
 WORKDIR /app
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
@@ -28,7 +33,7 @@ RUN pnpm build
 
 FROM node:22-alpine AS runner
 
-RUN corepack enable && corepack prepare pnpm@latest --activate
+RUN corepack enable && corepack prepare pnpm@11.7.0 --activate
 WORKDIR /app
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
