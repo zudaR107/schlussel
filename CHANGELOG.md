@@ -31,6 +31,15 @@ fit best; add a new section if none fits.
   checks for an existing session - reduces the flash during the SSO
   silent-reauth redirect chain, which loads and unloads this page within
   a fraction of a second.
+- Added a `/logout` page. schloss/kuvert's own logout buttons couldn't
+  actually clear the session cookie - it's host-only to this origin (no
+  Domain attribute, by design), so a fetch to `/auth/logout` proxied
+  through their own origin never carried it, silently leaving the
+  session intact and making logout look like it did nothing (the
+  redirect to the login page would just silently re-authenticate via
+  the still-valid session). This new page does the logout same-origin
+  (where the cookie is actually readable) via a real browser
+  navigation, then bounces back to `return_to`.
 
 ## UI
 - Added a header (brand mark linking back to schloss) and footer to the
