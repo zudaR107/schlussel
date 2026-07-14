@@ -53,10 +53,11 @@ function findLinkWithHref(href: string): HTMLAnchorElement | undefined {
 function expectHeaderLink(defaultAppUrl: string) {
   const headerLink = findLinkWithHref(defaultAppUrl)
   expect(headerLink).toBeTruthy()
-  // The shared Header no longer shows a visible brand-name text label next
-  // to the logo (an intentional design change - the logo icon is itself
-  // the home link) - the brand is now conveyed via a title tooltip instead.
-  expect(headerLink).toHaveAttribute('title', 'Schlüssel')
+  // The link leads to schloss, not to schlussel itself - the logo badge
+  // shows schloss's own logo mark (not schlussel's), so the tooltip says
+  // "На главную" rather than naming schlussel, which would incorrectly
+  // suggest the link stays within schlussel.
+  expect(headerLink).toHaveAttribute('title', 'На главную')
 }
 
 function expectFooter() {
