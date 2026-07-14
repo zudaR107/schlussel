@@ -69,6 +69,13 @@ fit best; add a new section if none fits.
   self-update to the latest 11.x broke every workflow run once pnpm
   11.12.0 shipped with a bug in its own self-installer, unrelated to
   any change in this repo.
+- Fixed the API image's Docker build after adopting schloss-ui: this
+  repo is a pnpm workspace, and `pnpm install --frozen-lockfile`
+  fetches every package in the lockfile to verify it (not just the
+  current project's own deps, even with `--filter`) - so the API
+  image needed GitHub Packages auth too, despite never using
+  `@zudar107/schloss-ui` itself. Added the same BuildKit-secret
+  `.npmrc` auth already used in `web/Dockerfile`.
 
 ## Docs
 - README, AGPL-3.0 LICENSE, CONTRIBUTING.md.
