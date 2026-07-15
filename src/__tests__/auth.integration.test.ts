@@ -11,7 +11,7 @@
  */
 
 import { describe, it, expect, beforeAll, beforeEach, afterAll, vi } from 'vitest'
-import { randomUUID } from 'crypto'
+import { randomUUID, randomBytes, createHash } from 'crypto'
 import { mkdirSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -433,22 +433,23 @@ describe('POST /auth/refresh', () => {
     expect((body['accessToken'] as string).length).toBeGreaterThan(0)
   })
 
-  it('sets a new schloss_refresh cookie on successful refresh', async () => {
+  it('sets a new schloss_refresh cookie on successful refresh when trusted', async () => {
     const res = await app.request('/auth/refresh', {
       method: 'POST',
-      headers: { Cookie: `schloss_refresh=${refreshTokenCookie}` },
+      headers: { Cookie: `schloss_refresh=${refreshTokenCookie}`, 'X-Schlussel-Frontend': '1' },
     })
     const newCookie = getCookieValue(res, 'schloss_refresh')
     expect(newCookie).not.toBeNull()
     expect((newCookie ?? '').length).toBeGreaterThan(0)
   })
 
-  it('new cookie is different from the old one (rotation)', async () => {
+  it('new cookie is different from the old one (rotation), when trusted', async () => {
     const res = await app.request('/auth/refresh', {
       method: 'POST',
-      headers: { Cookie: `schloss_refresh=${refreshTokenCookie}` },
+      headers: { Cookie: `schloss_refresh=${refreshTokenCookie}`, 'X-Schlussel-Frontend': '1' },
     })
     const newCookie = getCookieValue(res, 'schloss_refresh')
+    expect(newCookie).not.toBeNull()
     expect(newCookie).not.toBe(refreshTokenCookie)
   })
 
@@ -468,10 +469,11 @@ describe('POST /auth/refresh', () => {
   })
 
   it('new refresh token obtained after rotation works correctly', async () => {
-    // First rotation
+    // First rotation (trusted, so a replacement cookie is actually issued
+    // to rotate into)
     const res1 = await app.request('/auth/refresh', {
       method: 'POST',
-      headers: { Cookie: `schloss_refresh=${refreshTokenCookie}` },
+      headers: { Cookie: `schloss_refresh=${refreshTokenCookie}`, 'X-Schlussel-Frontend': '1' },
     })
     const newCookie = getCookieValue(res1, 'schloss_refresh')
 
@@ -718,5 +720,276 @@ describe('GET /auth/me', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+})
+
+// ── Trusted-origin gate (X-Schlussel-Frontend) ──────────────────────────────
+//
+// A new gate was added to POST /login (PKCE branch), POST /token, and
+// POST /refresh: the schloss_refresh session cookie is now only set on the
+// response when the request carries `X-Schlussel-Frontend: 1`. Everything
+// else about these endpoints (status codes, JSON bodies, business-logic
+// success/failure) must stay identical regardless of the header.
+//
+// POST /logout's cookie-CLEARING behavior is explicitly unchanged: it always
+// clears the cookie, with or without the header.
+
+const TRUSTED_HEADER = { 'X-Schlussel-Frontend': '1' }
+
+/** A PKCE code_verifier: 43-128 chars from the [A-Za-z0-9_-] charset. */
+function generateVerifier(length = 64): string {
+  // base64url alphabet is a strict subset of the allowed verifier charset,
+  // so slicing a long base64url string down to `length` stays in-charset.
+  let out = ''
+  while (out.length < length) out += randomBytes(48).toString('base64url')
+  return out.slice(0, length)
+}
+
+/** The real S256 challenge derivation: BASE64URL(SHA256(ASCII(verifier))). */
+function deriveChallenge(verifier: string): string {
+  return createHash('sha256').update(verifier).digest('base64url')
+}
+
+describe('POST /auth/login — PKCE branch — trusted origin gate', () => {
+  beforeEach(async () => {
+    await post('/auth/register', {
+      email: 'alice@example.com',
+      password: 'password123',
+      name: 'Alice',
+    })
+  })
+
+  it('without X-Schlussel-Frontend: returns 200 with { code } but sets no schloss_refresh cookie', async () => {
+    const verifier = generateVerifier()
+    const challenge = deriveChallenge(verifier)
+
+    const res = await post('/auth/login', {
+      email: 'alice@example.com',
+      password: 'password123',
+      codeChallenge: challenge,
+      codeChallengeMethod: 'S256',
+    })
+    expect(res.status).toBe(200)
+    const body = await res.json() as Record<string, unknown>
+    expect(typeof body['code']).toBe('string')
+    expect((body['code'] as string).length).toBeGreaterThan(0)
+    expect(getCookieValue(res, 'schloss_refresh')).toBeNull()
+  })
+
+  it('with X-Schlussel-Frontend: 1: returns the same { code } shape and DOES set the schloss_refresh cookie', async () => {
+    const verifier = generateVerifier()
+    const challenge = deriveChallenge(verifier)
+
+    const res = await post(
+      '/auth/login',
+      {
+        email: 'alice@example.com',
+        password: 'password123',
+        codeChallenge: challenge,
+        codeChallengeMethod: 'S256',
+      },
+      TRUSTED_HEADER,
+    )
+    expect(res.status).toBe(200)
+    const body = await res.json() as Record<string, unknown>
+    expect(typeof body['code']).toBe('string')
+    expect((body['code'] as string).length).toBeGreaterThan(0)
+
+    const cookie = getCookieValue(res, 'schloss_refresh')
+    expect(cookie).not.toBeNull()
+    expect((cookie ?? '').length).toBeGreaterThan(0)
+  })
+})
+
+describe('POST /auth/token — trusted origin gate', () => {
+  beforeEach(async () => {
+    await post('/auth/register', {
+      email: 'alice@example.com',
+      password: 'password123',
+      name: 'Alice',
+    })
+  })
+
+  it('redemption WITHOUT X-Schlussel-Frontend: succeeds with a real accessToken/user but sets no schloss_refresh cookie', async () => {
+    const verifier = generateVerifier()
+    const challenge = deriveChallenge(verifier)
+
+    const loginRes = await post(
+      '/auth/login',
+      {
+        email: 'alice@example.com',
+        password: 'password123',
+        codeChallenge: challenge,
+        codeChallengeMethod: 'S256',
+      },
+      TRUSTED_HEADER,
+    )
+    expect(loginRes.status).toBe(200)
+    const { code } = await loginRes.json() as { code: string }
+
+    const tokenRes = await post('/auth/token', { code, codeVerifier: verifier })
+    expect(tokenRes.status).toBe(200)
+    const body = await tokenRes.json() as Record<string, unknown>
+    expect(typeof body['accessToken']).toBe('string')
+    expect((body['accessToken'] as string).length).toBeGreaterThan(0)
+    const user = body['user'] as Record<string, unknown>
+    expect(user['email']).toBe('alice@example.com')
+    expect(user['name']).toBe('Alice')
+
+    expect(getCookieValue(tokenRes, 'schloss_refresh')).toBeNull()
+  })
+
+  it('redemption WITH X-Schlussel-Frontend: 1: same successful body AND sets the schloss_refresh cookie', async () => {
+    const verifier = generateVerifier()
+    const challenge = deriveChallenge(verifier)
+
+    const loginRes = await post(
+      '/auth/login',
+      {
+        email: 'alice@example.com',
+        password: 'password123',
+        codeChallenge: challenge,
+        codeChallengeMethod: 'S256',
+      },
+      TRUSTED_HEADER,
+    )
+    expect(loginRes.status).toBe(200)
+    const { code } = await loginRes.json() as { code: string }
+
+    const tokenRes = await post('/auth/token', { code, codeVerifier: verifier }, TRUSTED_HEADER)
+    expect(tokenRes.status).toBe(200)
+    const body = await tokenRes.json() as Record<string, unknown>
+    expect(typeof body['accessToken']).toBe('string')
+    expect((body['accessToken'] as string).length).toBeGreaterThan(0)
+    const user = body['user'] as Record<string, unknown>
+    expect(user['email']).toBe('alice@example.com')
+    expect(user['name']).toBe('Alice')
+
+    const cookie = getCookieValue(tokenRes, 'schloss_refresh')
+    expect(cookie).not.toBeNull()
+    expect((cookie ?? '').length).toBeGreaterThan(0)
+  })
+})
+
+describe('POST /auth/refresh — trusted origin gate', () => {
+  let refreshTokenCookie: string
+
+  beforeEach(async () => {
+    await post('/auth/register', {
+      email: 'alice@example.com',
+      password: 'password123',
+      name: 'Alice',
+    })
+    // A trusted login, so we start from a real, cookie-issued session.
+    const loginRes = await post(
+      '/auth/login',
+      { email: 'alice@example.com', password: 'password123' },
+      TRUSTED_HEADER,
+    )
+    refreshTokenCookie = getCookieValue(loginRes, 'schloss_refresh') ?? ''
+    expect(refreshTokenCookie).not.toBe('')
+    // jose uses second-precision iat. Wait to ensure a rotated token gets a
+    // different iat (and thus a different signature) from the original.
+    await new Promise((r) => setTimeout(r, 1100))
+  })
+
+  it('without X-Schlussel-Frontend: returns 200 with a real accessToken but does not set a Set-Cookie', async () => {
+    const res = await app.request('/auth/refresh', {
+      method: 'POST',
+      headers: { Cookie: `schloss_refresh=${refreshTokenCookie}` },
+    })
+    expect(res.status).toBe(200)
+    const body = await res.json() as Record<string, unknown>
+    expect(typeof body['accessToken']).toBe('string')
+    expect((body['accessToken'] as string).length).toBeGreaterThan(0)
+    expect(getCookieValue(res, 'schloss_refresh')).toBeNull()
+  })
+
+  it('old cookie stops working after an untrusted refresh, even though no replacement cookie was issued', async () => {
+    const first = await app.request('/auth/refresh', {
+      method: 'POST',
+      headers: { Cookie: `schloss_refresh=${refreshTokenCookie}` },
+    })
+    expect(first.status).toBe(200)
+    expect(getCookieValue(first, 'schloss_refresh')).toBeNull()
+
+    // The old cookie's DB row is gone (rotation cleanup ran), even though no
+    // new cookie was ever handed back to the client.
+    const second = await app.request('/auth/refresh', {
+      method: 'POST',
+      headers: { Cookie: `schloss_refresh=${refreshTokenCookie}` },
+    })
+    expect(second.status).toBe(401)
+    const body = await second.json() as Record<string, unknown>
+    expect(body['error']).toMatch(/expired or not found/i)
+  })
+
+  it('with X-Schlussel-Frontend: 1: returns 200 with a real accessToken AND a fresh rotated Set-Cookie (unchanged trusted behavior)', async () => {
+    const res = await app.request('/auth/refresh', {
+      method: 'POST',
+      headers: { Cookie: `schloss_refresh=${refreshTokenCookie}`, ...TRUSTED_HEADER },
+    })
+    expect(res.status).toBe(200)
+    const body = await res.json() as Record<string, unknown>
+    expect(typeof body['accessToken']).toBe('string')
+    expect((body['accessToken'] as string).length).toBeGreaterThan(0)
+
+    const newCookie = getCookieValue(res, 'schloss_refresh')
+    expect(newCookie).not.toBeNull()
+    expect(newCookie).not.toBe(refreshTokenCookie)
+  })
+})
+
+describe('POST /auth/logout — cookie clearing is unaffected by the trusted origin gate', () => {
+  let refreshTokenCookie: string
+
+  beforeEach(async () => {
+    await post('/auth/register', {
+      email: 'alice@example.com',
+      password: 'password123',
+      name: 'Alice',
+    })
+    const loginRes = await post(
+      '/auth/login',
+      { email: 'alice@example.com', password: 'password123' },
+      TRUSTED_HEADER,
+    )
+    refreshTokenCookie = getCookieValue(loginRes, 'schloss_refresh') ?? ''
+  })
+
+  it('clears the schloss_refresh cookie WITHOUT X-Schlussel-Frontend', async () => {
+    const res = await app.request('/auth/logout', {
+      method: 'POST',
+      headers: { Cookie: `schloss_refresh=${refreshTokenCookie}` },
+    })
+    expect(res.status).toBe(200)
+
+    const raw = getRawCookie(res, 'schloss_refresh')
+    expect(raw).not.toBeNull()
+    const isCleared =
+      raw!.includes('Max-Age=0') ||
+      raw!.includes('max-age=0') ||
+      raw!.includes('Expires=Thu, 01 Jan 1970') ||
+      raw!.match(/schloss_refresh=;/) !== null ||
+      raw!.match(/schloss_refresh=$/) !== null
+    expect(isCleared).toBe(true)
+  })
+
+  it('clears the schloss_refresh cookie WITH X-Schlussel-Frontend: 1', async () => {
+    const res = await app.request('/auth/logout', {
+      method: 'POST',
+      headers: { Cookie: `schloss_refresh=${refreshTokenCookie}`, ...TRUSTED_HEADER },
+    })
+    expect(res.status).toBe(200)
+
+    const raw = getRawCookie(res, 'schloss_refresh')
+    expect(raw).not.toBeNull()
+    const isCleared =
+      raw!.includes('Max-Age=0') ||
+      raw!.includes('max-age=0') ||
+      raw!.includes('Expires=Thu, 01 Jan 1970') ||
+      raw!.match(/schloss_refresh=;/) !== null ||
+      raw!.match(/schloss_refresh=$/) !== null
+    expect(isCleared).toBe(true)
   })
 })

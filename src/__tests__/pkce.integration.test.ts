@@ -151,7 +151,7 @@ describe('POST /auth/login — PKCE', () => {
       password: 'password123',
       codeChallenge: fixtureCodeChallenge(),
       codeChallengeMethod: 'S256',
-    })
+    }, { 'X-Schlussel-Frontend': '1' })
     expect(res.status).toBe(200)
     const cookies = res.headers.getSetCookie()
     expect(cookies.length).toBeGreaterThan(0)
@@ -284,8 +284,11 @@ describe('POST /auth/token', () => {
     expect(user['email']).toBe('alice@example.com')
     expect(user['name']).toBe('Alice')
 
-    expect(tokenRes.headers.getSetCookie().length).toBeGreaterThan(0)
-    expect(getCookieValue(tokenRes, 'schloss_refresh')).not.toBeNull()
+    // Redeemed here exactly like a real consumer app would (no
+    // X-Schlussel-Frontend header) - correctly does NOT get its own
+    // schloss_refresh cookie. See the trusted-origin gate tests further
+    // down for the case where this same call IS made trusted.
+    expect(getCookieValue(tokenRes, 'schloss_refresh')).toBeNull()
   })
 
   it('single-use: redeeming the same code a second time returns 400 and issues no token', async () => {
@@ -408,12 +411,13 @@ describe('POST /auth/refresh — codeChallenge extension', () => {
     await new Promise((r) => setTimeout(r, 1100))
   })
 
-  function refreshWithCookie(body: unknown | undefined, cookie: string) {
+  function refreshWithCookie(body: unknown | undefined, cookie: string, extraHeaders?: Record<string, string>) {
     return app.request('/auth/refresh', {
       method: 'POST',
       headers: {
         ...(cookie ? { Cookie: `schloss_refresh=${cookie}` } : {}),
         ...(body !== undefined ? JSON_HEADERS : {}),
+        ...extraHeaders,
       },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     })
@@ -426,6 +430,7 @@ describe('POST /auth/refresh — codeChallenge extension', () => {
     const res = await refreshWithCookie(
       { codeChallenge: challenge, codeChallengeMethod: 'S256' },
       refreshCookie,
+      { 'X-Schlussel-Frontend': '1' },
     )
     expect(res.status).toBe(200)
     const body = await res.json() as Record<string, unknown>
@@ -558,8 +563,8 @@ describe('POST /auth/refresh — codeChallenge extension', () => {
     expect(res.headers.getSetCookie()).toEqual([])
   })
 
-  it('regression: no body at all still behaves as a plain refresh (200, { accessToken }, cookie rotated)', async () => {
-    const res = await refreshWithCookie(undefined, refreshCookie)
+  it('regression: no body at all still behaves as a plain refresh (200, { accessToken }, cookie rotated when trusted)', async () => {
+    const res = await refreshWithCookie(undefined, refreshCookie, { 'X-Schlussel-Frontend': '1' })
     expect(res.status).toBe(200)
     const body = await res.json() as Record<string, unknown>
     expect(typeof body['accessToken']).toBe('string')
