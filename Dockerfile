@@ -16,6 +16,14 @@ ENV CI=true
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
 
+# better-sqlite3's install script downloads a prebuilt binary and only
+# falls back to compiling from source (needs Python + a C/C++
+# toolchain, absent from node:22-alpine by default) if that download
+# fails - a transient network hiccup then hard-fails the whole build
+# instead of just being slower. Installed unconditionally so the rare
+# fallback path works instead of erroring out.
+RUN apk add --no-cache python3 make g++
+
 # pnpm's frozen-lockfile install fetches every package in the lockfile
 # to the content-addressable store to verify it (not just this
 # project's own deps, even with --filter) - since web's
@@ -43,6 +51,8 @@ RUN corepack enable && corepack prepare pnpm@11.7.0 --activate
 WORKDIR /app
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
+# See the builder stage's comment above - same fallback-compile issue.
+RUN apk add --no-cache python3 make g++
 RUN --mount=type=secret,id=npm_token \
     echo "//npm.pkg.github.com/:_authToken=$(cat /run/secrets/npm_token)" >> /root/.npmrc \
     && pnpm install --frozen-lockfile --prod
