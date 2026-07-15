@@ -13,6 +13,13 @@ const REFRESH_TOKEN_MAX_AGE = 60 * 60 * 24 * 7 // 7 days in seconds
 const COOKIE_NAME = 'schloss_refresh'
 const AUTH_CODE_MAX_AGE = 60 // seconds
 
+// Injected only by schlussel/web's own proxy (Caddyfile + vite dev config)
+// on its /auth/* passthrough - every consumer app's own /auth/* proxy
+// (kuvert, schloss) does NOT add this. Trust boundary: schlussel:4000 is
+// never published outside the docker network (see docker-compose.yml), so
+// this header can't be forged by anything but code we control.
+const TRUSTED_ORIGIN_HEADER = 'x-schlussel-frontend'
+
 function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex')
 }
@@ -73,17 +80,20 @@ async function establishSession(c: Parameters<typeof setCookieHeader>[0], userId
   setCookieHeader(c, refreshToken)
 }
 
-// Issues a real access token plus a fresh session cookie - shared by the
-// no-PKCE /login branch and the /token exchange, both of which hand the
-// access token straight back in the response body.
-async function issueSession(c: Parameters<typeof setCookieHeader>[0], user: User) {
+// Issues a real access token plus, if `trusted`, a fresh session cookie -
+// shared by the no-PKCE /login branch (always trusted: like the PKCE
+// branch above, only ever reachable same-origin) and the /token exchange
+// (trusted only per isTrustedOrigin, since it's the one endpoint genuinely
+// called through consumer apps' own proxies). Both hand the access token
+// straight back in the response body regardless.
+async function issueSession(c: Parameters<typeof setCookieHeader>[0], user: User, trusted: boolean) {
   const accessToken = await signAccessToken({
     sub: user.id,
     email: user.email,
     name: user.name,
     role: user.role,
   })
-  await establishSession(c, user.id)
+  if (trusted) await establishSession(c, user.id)
 
   return {
     accessToken,
@@ -147,19 +157,22 @@ authRouter.post('/login', zValidator('json', loginSchema), async (c) => {
   // PKCE handoff: issue a short-lived one-time code instead of a real
   // token, so the token itself never has to travel through a URL - the
   // caller redeems it at POST /auth/token with the matching verifier.
-  // Also establishes a real session here: this endpoint is only ever
-  // called from schlussel's own hosted login page (never proxied through
-  // another service's origin), so the cookie lands on schlussel's own
-  // origin and stays there - no cross-subdomain Domain attribute needed.
-  // That's what lets the silent-reauth branch of /refresh below skip the
-  // credentials form entirely the next time any app redirects here.
+  // Also establishes a real session here, gated by isTrustedOrigin: this
+  // endpoint should only ever be called from schlussel's own hosted login
+  // page (never proxied through another service's origin), so the cookie
+  // lands on schlussel's own origin and stays there - no cross-subdomain
+  // Domain attribute needed. That's what lets the silent-reauth branch of
+  // /refresh below skip the credentials form entirely the next time any
+  // app redirects here.
   if (codeChallenge) {
-    await establishSession(c, user.id)
+    if (isTrustedOrigin(c)) await establishSession(c, user.id)
     const code = await issueAuthCode(user.id, codeChallenge)
     return c.json({ code })
   }
 
-  return c.json(await issueSession(c, user))
+  // No-PKCE branch: like the PKCE branch above, only ever reachable
+  // same-origin - always trusted.
+  return c.json(await issueSession(c, user, true))
 })
 
 authRouter.post('/token', zValidator('json', tokenSchema), async (c) => {
@@ -187,7 +200,7 @@ authRouter.post('/token', zValidator('json', tokenSchema), async (c) => {
   const user = await db.select().from(users).where(eq(users.id, stored.userId)).get()
   if (!user) return c.json({ error: 'Invalid or expired code' }, 400)
 
-  return c.json(await issueSession(c, user))
+  return c.json(await issueSession(c, user, isTrustedOrigin(c)))
 })
 
 authRouter.post('/refresh', async (c) => {
@@ -229,11 +242,18 @@ authRouter.post('/refresh', async (c) => {
   const parsed = refreshSchema.safeParse(body)
   if (!parsed.success) return c.json({ error: 'Invalid request' }, 400)
 
-  // Rotate refresh token
+  // Rotate refresh token - deleted unconditionally, re-issued only if
+  // trusted (see isTrustedOrigin). An untrusted caller (a consumer app's
+  // own proxied /auth/refresh, polling to keep its local state fresh)
+  // still gets a valid access token back for whatever cookie it already
+  // had, but that cookie is not renewed - it quietly stops working the
+  // moment its now-deleted DB row is looked up again, instead of being
+  // rotated forever.
   await db.delete(refreshTokens).where(eq(refreshTokens.tokenHash, tokenHash))
+  const trusted = isTrustedOrigin(c)
 
   if (parsed.data.codeChallenge) {
-    await establishSession(c, user.id)
+    if (trusted) await establishSession(c, user.id)
     const code = await issueAuthCode(user.id, parsed.data.codeChallenge)
     return c.json({ code })
   }
@@ -244,7 +264,7 @@ authRouter.post('/refresh', async (c) => {
     name: user.name,
     role: user.role,
   })
-  await establishSession(c, user.id)
+  if (trusted) await establishSession(c, user.id)
 
   return c.json({ accessToken: newAccessToken })
 })
@@ -293,4 +313,8 @@ function getCookie(c: { req: { header: (name: string) => string | undefined } })
   if (!cookieHeader) return null
   const match = cookieHeader.match(new RegExp(`(?:^|;\\s*)${COOKIE_NAME}=([^;]+)`))
   return match?.[1] ?? null
+}
+
+function isTrustedOrigin(c: { req: { header: (name: string) => string | undefined } }): boolean {
+  return c.req.header(TRUSTED_ORIGIN_HEADER) === '1'
 }

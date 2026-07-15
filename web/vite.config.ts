@@ -12,9 +12,17 @@ export default defineConfig({
   server: {
     port: 4001,
     proxy: {
+      // X-Schlussel-Frontend marks this as a genuinely same-origin call -
+      // mirrors Caddyfile's header_up for the production build. Consumer
+      // apps' own dev proxies (kuvert, schloss) must NEVER add this.
       '/auth': {
         target: 'http://localhost:4000',
         changeOrigin: true,
+        configure: (proxy) => {
+          proxy.on('proxyReq', (proxyReq) => {
+            proxyReq.setHeader('X-Schlussel-Frontend', '1')
+          })
+        },
       },
     },
   },
