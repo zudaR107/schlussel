@@ -1,9 +1,7 @@
 packages:
   - "web"
+  - "schloss-ui"
 
 allowBuilds:
   better-sqlite3: true
   esbuild: true
-
-minimumReleaseAgeExclude:
-  - '@zudar107/schloss-ui@0.2.0 || 0.3.0 || 0.4.0 || 0.4.1'

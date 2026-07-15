@@ -14,7 +14,8 @@ WORKDIR /app
 # there), so it must be set explicitly here.
 ENV CI=true
 
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY schloss-ui/package.json ./schloss-ui/
 
 # better-sqlite3's install script downloads a prebuilt binary and only
 # falls back to compiling from source (needs Python + a C/C++
@@ -24,20 +25,14 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
 # fallback path works instead of erroring out.
 RUN apk add --no-cache python3 make g++
 
-# pnpm's frozen-lockfile install fetches every package in the lockfile
-# to the content-addressable store to verify it (not just this
-# project's own deps, even with --filter) - since web's
-# @zudar107/schloss-ui is part of the same workspace lockfile, this
-# image needs registry auth too, despite never using the package
-# itself. The token is passed as a BuildKit secret (not an ARG, so it
-# never ends up baked into an image layer) and written to a
-# user-level .npmrc - pnpm refuses to expand env vars in the *project*
-# .npmrc's auth line (to stop a malicious committed .npmrc from
-# exfiltrating a token to an attacker registry), so it can't just go
-# in ./.npmrc.
-RUN --mount=type=secret,id=npm_token \
-    echo "//npm.pkg.github.com/:_authToken=$(cat /run/secrets/npm_token)" >> /root/.npmrc \
-    && pnpm install --frozen-lockfile
+# pnpm's frozen-lockfile install verifies/resolves every package in the
+# lockfile, not just this project's own deps, even with --filter -
+# since web's @zudar107/schloss-ui is part of the same workspace
+# lockfile, its package.json (copied above) needs to be present for
+# this to resolve, despite never using the package itself. No registry
+# involved (it's a workspace:* link to the schloss-ui submodule), so
+# no auth needed either.
+RUN pnpm install --frozen-lockfile
 
 COPY tsconfig.json drizzle.config.ts ./
 COPY src ./src
@@ -50,12 +45,11 @@ FROM node:22-alpine AS runner
 RUN corepack enable && corepack prepare pnpm@11.7.0 --activate
 WORKDIR /app
 
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY schloss-ui/package.json ./schloss-ui/
 # See the builder stage's comment above - same fallback-compile issue.
 RUN apk add --no-cache python3 make g++
-RUN --mount=type=secret,id=npm_token \
-    echo "//npm.pkg.github.com/:_authToken=$(cat /run/secrets/npm_token)" >> /root/.npmrc \
-    && pnpm install --frozen-lockfile --prod
+RUN pnpm install --frozen-lockfile --prod
 
 COPY --from=builder /app/dist ./dist
 COPY src/db/migrations ./dist/db/migrations
