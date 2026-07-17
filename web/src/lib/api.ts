@@ -9,6 +9,15 @@ interface LoginResponse {
   code: string
 }
 
+interface TokenResponse {
+  accessToken: string
+  user: AuthUser
+}
+
+interface RefreshResponse {
+  accessToken: string
+}
+
 export class ApiError extends Error {
   status: number
 
@@ -30,6 +39,53 @@ async function post<T>(path: string, body: unknown): Promise<T> {
     throw new ApiError(res.status, data?.error ?? 'Request failed')
   }
   return res.json() as Promise<T>
+}
+
+// Shared by every /auth call the account page makes once it holds a real
+// access token (GET /me, PATCH /password, DELETE /account) - unlike
+// login/register, these carry a Bearer header instead of (or alongside)
+// the session cookie.
+async function authed<T>(method: string, path: string, accessToken: string, body?: unknown): Promise<T> {
+  const res = await fetch(`/auth${path}`, {
+    method,
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
+    credentials: 'include',
+    body: body === undefined ? undefined : JSON.stringify(body),
+  })
+  if (!res.ok) {
+    const data = await res.json().catch(() => null) as { error?: string } | null
+    throw new ApiError(res.status, data?.error ?? 'Request failed')
+  }
+  return res.json() as Promise<T>
+}
+
+// Plain silent-session check, no PKCE involved - used by the account page
+// to detect an existing schlussel cookie session on mount, exactly like
+// every consumer app's own background refresh (see e.g. kuvert's
+// useAuthProvider), just without the codeChallenge branch since this
+// never has to hand a token across an origin boundary.
+export function refreshSession(): Promise<RefreshResponse> {
+  return post<RefreshResponse>('/refresh', {})
+}
+
+export function fetchMe(accessToken: string): Promise<AuthUser> {
+  return authed<AuthUser>('GET', '/me', accessToken)
+}
+
+// Redeems the one-time code from schlussel's own login page (see
+// AccountPage's bootstrap) the same way every other consumer app's own
+// callback page does - returns the user directly, no separate /me
+// round-trip needed.
+export function exchangeCode(code: string, codeVerifier: string): Promise<TokenResponse> {
+  return post<TokenResponse>('/token', { code, codeVerifier })
+}
+
+export function changePassword(accessToken: string, currentPassword: string, newPassword: string): Promise<{ ok: true }> {
+  return authed('PATCH', '/password', accessToken, { currentPassword, newPassword })
+}
+
+export function deleteAccount(accessToken: string, password: string): Promise<{ ok: true }> {
+  return authed('DELETE', '/account', accessToken, { password })
 }
 
 // PKCE handoff: the server issues a short-lived one-time code instead of

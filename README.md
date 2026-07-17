@@ -34,7 +34,26 @@ every request.
 This repo has two parts:
 
 - the root package — the Hono API (accounts, login/register, JWT issuance, JWKS)
-- `web/` — the hosted login/register pages every other service redirects to
+- `web/` — the hosted login/register pages every other service redirects to, plus
+  `/account`, the single unified account settings page (password, delete account) every
+  service's header links out to instead of showing its own
+
+### The unified account settings contract
+
+Every Schloss service has one settings surface for things it owns itself (a per-service
+preference, a theme, a currency default) and none of them should ever build a second
+password/delete-account page of their own — that lives exactly once, here, at `/account`.
+A new service wires this up the same three-line way it already wires up login:
+
+1. Copy the `buildSchluesselAccountUrl(currentPath, origin?)` helper (see kuvert's or
+   schloss's own `lib/authRedirect.ts` for the exact shape — same pattern as the
+   existing `buildSchluesselLoginUrl`/`buildSchluesselLogoutUrl` helpers, just a plain
+   link with a `return_to`, no PKCE needed since nothing crosses back with a token).
+2. Pass `onSettings={() => { window.location.href = buildSchluesselAccountUrl(window.location.pathname) }}`
+   to the shared `Header` component instead of routing to a local page.
+3. Keep any real per-service settings (a sidebar page, a preferences panel) reachable
+   from the service's own navigation — just not from the header's gear icon, which is
+   reserved for this page.
 
 ## Local development
 
@@ -67,12 +86,13 @@ See `.env.example` for the API. The important ones:
 | `ALLOWED_ORIGINS` | Comma-separated CORS allowlist |
 
 `web/` reads two build-time variables (see `web/Dockerfile`): `VITE_ALLOWED_RETURN_ORIGINS`,
-a comma-separated allowlist of origins the hosted login page is allowed to redirect back
-to after a successful sign-in (a `return_to` pointing anywhere outside this list is
-rejected instead of followed - the open-redirect guard), and `VITE_DEFAULT_APP_URL`,
-where a visitor who opened `/login` or `/register` directly (no `return_to` at all) gets
-sent instead of ever seeing the form - these pages are only reachable via an external
-redirect.
+a comma-separated allowlist of origins the hosted login page (and `/account`'s own "back
+to app" link) is allowed to redirect back to (a `return_to` pointing anywhere outside
+this list is rejected instead of followed - the open-redirect guard), and
+`VITE_DEFAULT_APP_URL`, where a visitor who opened `/login` or `/register` directly (no
+`return_to` at all) gets sent instead of ever seeing the form - these pages are only
+reachable via an external redirect. `/account` is reachable directly (it checks for an
+existing session itself, bouncing through `/login` if there isn't one).
 
 ## Running with Docker
 

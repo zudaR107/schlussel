@@ -1,0 +1,290 @@
+import { useState, useEffect } from 'react'
+import { KeyRound, Trash2 } from 'lucide-react'
+import { Button } from '@zudar107/schloss-ui'
+import { generateCodeVerifier, generateCodeChallenge } from '../../lib/pkce'
+import { refreshSession, fetchMe, exchangeCode, changePassword, deleteAccount, ApiError, type AuthUser } from '../../lib/api'
+import { readReturnTo, DEFAULT_APP_URL, type ReturnToResult } from '../../lib/returnTo'
+import { PasswordField } from '../auth/PasswordField'
+import { Header } from '../../components/Header'
+import { Footer } from '../../components/Footer'
+
+const CODE_VERIFIER_STORAGE_KEY = 'account_pkce_code_verifier'
+
+// Sent to /login with return_to pointing right back at /account (carrying
+// the ORIGINAL caller's own return_to along as a nested param, so the
+// "back to app" link below still works after the round trip) - mirrors
+// every consumer app's own buildSchluesselLoginUrl, just same-origin.
+async function redirectToLogin(originalReturnTo: ReturnToResult) {
+  const backParam = originalReturnTo.present && originalReturnTo.valid
+    ? `?return_to=${encodeURIComponent(originalReturnTo.url)}`
+    : ''
+  const returnTo = `${window.location.origin}/account${backParam}`
+
+  const verifier = generateCodeVerifier()
+  sessionStorage.setItem(CODE_VERIFIER_STORAGE_KEY, verifier)
+  const challenge = await generateCodeChallenge(verifier)
+
+  const params = new URLSearchParams({
+    return_to: returnTo,
+    code_challenge: challenge,
+    code_challenge_method: 'S256',
+  })
+  window.location.href = `/login?${params.toString()}`
+}
+
+// The single account settings page every Schloss service's header
+// "Настройки" button links out to (see e.g. kuvert's
+// buildSchluesselAccountUrl) - profile info plus the things that only
+// make sense once, platform-wide, not per-service: password and account
+// deletion. Per-service preferences (currency, theme, ...) stay in each
+// service's own sidebar settings page.
+export function AccountPage() {
+  const [user, setUser] = useState<AuthUser | null>(null)
+  const [accessToken, setAccessTokenState] = useState('')
+  const [backTo, setBackTo] = useState<ReturnToResult | null>(null)
+  const [checking, setChecking] = useState(true)
+
+  useEffect(() => {
+    const initialReturnTo = readReturnTo()
+    let cancelled = false
+
+    async function bootstrap() {
+      const params = new URLSearchParams(window.location.search)
+      const code = params.get('code')
+      history.replaceState(null, '', window.location.pathname)
+
+      const verifier = sessionStorage.getItem(CODE_VERIFIER_STORAGE_KEY)
+      sessionStorage.removeItem(CODE_VERIFIER_STORAGE_KEY)
+
+      if (code && verifier) {
+        try {
+          const data = await exchangeCode(code, verifier)
+          if (cancelled) return
+          setAccessTokenState(data.accessToken)
+          setUser(data.user)
+          setBackTo(initialReturnTo)
+          setChecking(false)
+          return
+        } catch {
+          // Fall through to a plain silent-session check below - the
+          // trusted login that just happened already left a fresh cookie
+          // here regardless of whether this code redemption succeeded.
+        }
+      }
+
+      try {
+        const { accessToken: token } = await refreshSession()
+        const me = await fetchMe(token)
+        if (cancelled) return
+        setAccessTokenState(token)
+        setUser(me)
+        setBackTo(initialReturnTo)
+        setChecking(false)
+      } catch {
+        if (!cancelled) await redirectToLogin(initialReturnTo)
+      }
+    }
+
+    void bootstrap()
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  async function handleLogout() {
+    window.location.href = '/logout'
+  }
+
+  if (checking || !user) {
+    return <div style={{ minHeight: '100vh', background: 'var(--bg-base)' }} />
+  }
+
+  return (
+    <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column' }}>
+      <Header user={{ name: user.name }} onLogout={handleLogout} />
+
+      <div style={{ flex: 1, background: 'var(--bg-base)', padding: '2rem 1rem' }}>
+        <div style={{ maxWidth: 480, margin: '0 auto', display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+          {backTo?.present && backTo.valid && (
+            <a href={backTo.url} style={{ fontSize: '0.8125rem', color: 'var(--text-muted)', textDecoration: 'none' }}>
+              ← Назад
+            </a>
+          )}
+
+          <div>
+            <h1 style={{ margin: 0, fontSize: '1.375rem', fontWeight: 700, letterSpacing: '-0.02em', color: 'var(--text-primary)' }}>
+              Настройки аккаунта
+            </h1>
+            <p style={{ margin: '0.25rem 0 0', color: 'var(--text-muted)', fontSize: '0.8125rem' }}>
+              Единые для всех сервисов платформы
+            </p>
+          </div>
+
+          <ProfileCard user={user} />
+          <PasswordCard accessToken={accessToken} />
+          <DangerZoneCard accessToken={accessToken} />
+        </div>
+      </div>
+
+      <Footer />
+    </div>
+  )
+}
+
+function ProfileCard({ user }: { user: AuthUser }) {
+  return (
+    <div className="card" style={{ padding: '1.25rem 1.5rem', display: 'flex', alignItems: 'center', gap: '0.875rem' }}>
+      <div style={{
+        width: 44, height: 44, borderRadius: '50%', flexShrink: 0,
+        background: 'var(--accent)', color: '#fff', fontWeight: 700, fontSize: '1.0625rem',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+      }}>
+        {user.name.trim().charAt(0).toUpperCase()}
+      </div>
+      <div style={{ minWidth: 0 }}>
+        <div style={{ fontSize: '0.9375rem', fontWeight: 600, color: 'var(--text-primary)' }}>{user.name}</div>
+        <div style={{ fontSize: '0.8125rem', color: 'var(--text-muted)' }}>{user.email}</div>
+      </div>
+    </div>
+  )
+}
+
+function PasswordCard({ accessToken }: { accessToken: string }) {
+  const [currentPassword, setCurrentPassword] = useState('')
+  const [newPassword, setNewPassword] = useState('')
+  const [confirmPassword, setConfirmPassword] = useState('')
+  const [error, setError] = useState('')
+  const [success, setSuccess] = useState(false)
+  const [loading, setLoading] = useState(false)
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    setError('')
+    setSuccess(false)
+    if (newPassword !== confirmPassword) {
+      setError('Пароли не совпадают')
+      return
+    }
+    setLoading(true)
+    try {
+      await changePassword(accessToken, currentPassword, newPassword)
+      setCurrentPassword('')
+      setNewPassword('')
+      setConfirmPassword('')
+      setSuccess(true)
+    } catch (err) {
+      setError(err instanceof ApiError && err.status === 401 ? 'Неверный текущий пароль' : 'Не удалось изменить пароль')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div className="card" style={{ padding: '1.5rem' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1rem' }}>
+        <KeyRound size={17} color="var(--text-secondary)" />
+        <h2 style={{ margin: 0, fontSize: '0.9375rem', fontWeight: 600, color: 'var(--text-primary)' }}>Пароль</h2>
+      </div>
+
+      <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '0.875rem' }}>
+        <PasswordField
+          id="account-current-password"
+          label="Текущий пароль"
+          value={currentPassword}
+          onChange={setCurrentPassword}
+          autoComplete="current-password"
+        />
+        <PasswordField
+          id="account-new-password"
+          label="Новый пароль"
+          value={newPassword}
+          onChange={setNewPassword}
+          placeholder="Минимум 8 символов"
+          minLength={8}
+          autoComplete="new-password"
+        />
+        <PasswordField
+          id="account-new-password-confirm"
+          label="Повторите новый пароль"
+          value={confirmPassword}
+          onChange={setConfirmPassword}
+          placeholder="Минимум 8 символов"
+          minLength={8}
+          autoComplete="new-password"
+        />
+
+        {error && (
+          <div style={{ padding: '0.625rem 0.75rem', background: 'var(--danger-muted)', border: '1px solid var(--danger)', borderRadius: 8, fontSize: '0.8125rem', color: 'var(--danger)' }}>
+            {error}
+          </div>
+        )}
+        {success && (
+          <div style={{ padding: '0.625rem 0.75rem', background: 'var(--success-muted)', border: '1px solid var(--success)', borderRadius: 8, fontSize: '0.8125rem', color: 'var(--success)' }}>
+            Пароль изменён. Вы вышли из всех остальных сеансов.
+          </div>
+        )}
+
+        <Button type="submit" variant="primary" disabled={loading} style={{ justifyContent: 'center', padding: '0.625rem' }}>
+          {loading ? 'Сохранение…' : 'Изменить пароль'}
+        </Button>
+      </form>
+    </div>
+  )
+}
+
+function DangerZoneCard({ accessToken }: { accessToken: string }) {
+  const [password, setPassword] = useState('')
+  const [error, setError] = useState('')
+  const [loading, setLoading] = useState(false)
+
+  async function handleDelete(e: React.FormEvent) {
+    e.preventDefault()
+    setError('')
+    setLoading(true)
+    try {
+      await deleteAccount(accessToken, password)
+      window.location.href = DEFAULT_APP_URL
+    } catch (err) {
+      setError(err instanceof ApiError && err.status === 401 ? 'Неверный пароль' : 'Не удалось удалить аккаунт')
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div className="card" style={{ padding: '1.5rem', border: '1px solid var(--danger)' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.5rem' }}>
+        <Trash2 size={17} color="var(--danger)" />
+        <h2 style={{ margin: 0, fontSize: '0.9375rem', fontWeight: 600, color: 'var(--danger)' }}>Удалить аккаунт</h2>
+      </div>
+      <p style={{ margin: '0 0 1rem', fontSize: '0.8125rem', color: 'var(--text-muted)' }}>
+        Аккаунт и доступ ко всем сервисам платформы будут удалены безвозвратно. Введите пароль, чтобы подтвердить.
+      </p>
+
+      <form onSubmit={handleDelete} style={{ display: 'flex', flexDirection: 'column', gap: '0.875rem' }}>
+        <PasswordField
+          id="account-delete-password"
+          label="Пароль"
+          value={password}
+          onChange={setPassword}
+          autoComplete="current-password"
+        />
+
+        {error && (
+          <div style={{ padding: '0.625rem 0.75rem', background: 'var(--danger-muted)', border: '1px solid var(--danger)', borderRadius: 8, fontSize: '0.8125rem', color: 'var(--danger)' }}>
+            {error}
+          </div>
+        )}
+
+        <Button
+          type="submit"
+          variant="danger"
+          disabled={loading || !password}
+          style={{ justifyContent: 'center', padding: '0.625rem' }}
+        >
+          {loading ? 'Удаление…' : 'Удалить аккаунт навсегда'}
+        </Button>
+      </form>
+    </div>
+  )
+}
