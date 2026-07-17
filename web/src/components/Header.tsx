@@ -1,13 +1,21 @@
-import { Header as SharedHeader } from '@zudar107/schloss-ui'
+import { Header as SharedHeader, type HeaderUser } from '@zudar107/schloss-ui'
 import { DEFAULT_APP_URL } from '../lib/returnTo'
 
-// schlussel's pre-auth pages never show a user/logout - just the home-link
-// simplification from the shared Header applies here. The home link
-// leads to schloss (schlussel has no home page of its own), so the
-// badge shows schloss's own logo mark, not schlussel's - it should look
-// like it goes to a different app, not display schlussel's identity in
-// a slot meant for "where this link goes".
-export function Header() {
+interface HeaderProps {
+  // Only AccountPage passes these - Login/Register/Logout are pre-auth,
+  // so they render the plain home-link-only header these default to.
+  user?: HeaderUser | null
+  onLogout?: () => void
+}
+
+// The home link leads to schloss (schlussel has no home page of its own),
+// so the badge shows schloss's own logo mark, not schlussel's - it should
+// look like it goes to a different app, not display schlussel's identity
+// in a slot meant for "where this link goes". No onSettings is ever
+// wired here - this IS the settings destination every other service's
+// header points at, so there is nowhere further for its own gear icon to
+// go.
+export function Header({ user, onLogout }: HeaderProps = {}) {
   return (
     <SharedHeader
       logo={
@@ -18,6 +26,8 @@ export function Header() {
       }
       homeHref={DEFAULT_APP_URL}
       homeTitle="На главную"
+      user={user}
+      onLogout={onLogout}
     />
   )
 }

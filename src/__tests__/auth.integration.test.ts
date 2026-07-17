@@ -89,6 +89,22 @@ function post(path: string, body: unknown, extraHeaders?: Record<string, string>
   })
 }
 
+function patch(path: string, body: unknown, extraHeaders?: Record<string, string>) {
+  return app.request(path, {
+    method: 'PATCH',
+    headers: { ...JSON_HEADERS, ...extraHeaders },
+    body: JSON.stringify(body),
+  })
+}
+
+function del(path: string, body: unknown, extraHeaders?: Record<string, string>) {
+  return app.request(path, {
+    method: 'DELETE',
+    headers: { ...JSON_HEADERS, ...extraHeaders },
+    body: JSON.stringify(body),
+  })
+}
+
 async function registerUser(
   email = 'alice@example.com',
   password = 'password123',
@@ -991,5 +1007,349 @@ describe('POST /auth/logout — cookie clearing is unaffected by the trusted ori
       raw!.match(/schloss_refresh=;/) !== null ||
       raw!.match(/schloss_refresh=$/) !== null
     expect(isCleared).toBe(true)
+  })
+})
+
+describe('PATCH /auth/password', () => {
+  let accessToken: string
+  let refreshTokenCookie: string
+
+  beforeEach(async () => {
+    await post('/auth/register', {
+      email: 'alice@example.com',
+      password: 'password123',
+      name: 'Alice',
+    })
+    const loginRes = await post('/auth/login', {
+      email: 'alice@example.com',
+      password: 'password123',
+    })
+    const body = await loginRes.json() as Record<string, unknown>
+    accessToken = body['accessToken'] as string
+    refreshTokenCookie = getCookieValue(loginRes, 'schloss_refresh') ?? ''
+  })
+
+  it('returns 401 when Authorization header is missing', async () => {
+    const res = await patch('/auth/password', {
+      currentPassword: 'password123',
+      newPassword: 'newpassword123',
+    })
+    expect(res.status).toBe(401)
+  })
+
+  it('returns 401 for a garbage Bearer token', async () => {
+    const res = await patch(
+      '/auth/password',
+      { currentPassword: 'password123', newPassword: 'newpassword123' },
+      { Authorization: 'Bearer thisisnotavalidtoken' },
+    )
+    expect(res.status).toBe(401)
+  })
+
+  it('returns 401 for a tampered token', async () => {
+    const parts = accessToken.split('.')
+    const sig = parts[2]!
+    const mid = Math.floor(sig.length / 2)
+    const tamperedChar = sig[mid] === 'A' ? 'B' : 'A'
+    const tamperedSig = sig.slice(0, mid) + tamperedChar + sig.slice(mid + 1)
+    const tampered = `${parts[0]}.${parts[1]}.${tamperedSig}`
+
+    const res = await patch(
+      '/auth/password',
+      { currentPassword: 'password123', newPassword: 'newpassword123' },
+      { Authorization: `Bearer ${tampered}` },
+    )
+    expect(res.status).toBe(401)
+  })
+
+  it('returns 401 for expired access token', async () => {
+    vi.useFakeTimers()
+    try {
+      vi.advanceTimersByTime(16 * 60 * 1000)
+      const res = await patch(
+        '/auth/password',
+        { currentPassword: 'password123', newPassword: 'newpassword123' },
+        { Authorization: `Bearer ${accessToken}` },
+      )
+      expect(res.status).toBe(401)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('returns 400 or 422 for a completely empty body', async () => {
+    const res = await patch('/auth/password', {}, { Authorization: `Bearer ${accessToken}` })
+    expect([400, 422]).toContain(res.status)
+  })
+
+  it('returns 400 or 422 for missing newPassword field', async () => {
+    const res = await patch(
+      '/auth/password',
+      { currentPassword: 'password123' },
+      { Authorization: `Bearer ${accessToken}` },
+    )
+    expect([400, 422]).toContain(res.status)
+  })
+
+  it('returns 400 or 422 for newPassword shorter than 8 characters', async () => {
+    const res = await patch(
+      '/auth/password',
+      { currentPassword: 'password123', newPassword: 'short' },
+      { Authorization: `Bearer ${accessToken}` },
+    )
+    expect([400, 422]).toContain(res.status)
+  })
+
+  it('returns 400 or 422 for newPassword longer than 128 characters', async () => {
+    const res = await patch(
+      '/auth/password',
+      { currentPassword: 'password123', newPassword: 'a'.repeat(129) },
+      { Authorization: `Bearer ${accessToken}` },
+    )
+    expect([400, 422]).toContain(res.status)
+  })
+
+  it('returns 401 with { error: "Invalid current password" } when currentPassword is wrong', async () => {
+    const res = await patch(
+      '/auth/password',
+      { currentPassword: 'wrongpassword', newPassword: 'newpassword123' },
+      { Authorization: `Bearer ${accessToken}` },
+    )
+    expect(res.status).toBe(401)
+    const body = await res.json() as Record<string, unknown>
+    expect(body['error']).toBe('Invalid current password')
+  })
+
+  it('returns 200 with { ok: true } on success', async () => {
+    const res = await patch(
+      '/auth/password',
+      { currentPassword: 'password123', newPassword: 'newpassword123' },
+      { Authorization: `Bearer ${accessToken}` },
+    )
+    expect(res.status).toBe(200)
+    const body = await res.json() as Record<string, unknown>
+    expect(body['ok']).toBe(true)
+  })
+
+  it('sets a fresh schloss_refresh cookie even without X-Schlussel-Frontend', async () => {
+    const res = await patch(
+      '/auth/password',
+      { currentPassword: 'password123', newPassword: 'newpassword123' },
+      { Authorization: `Bearer ${accessToken}` },
+    )
+    const cookie = getCookieValue(res, 'schloss_refresh')
+    expect(cookie).not.toBeNull()
+    expect((cookie ?? '').length).toBeGreaterThan(0)
+  })
+
+  it('after a successful change, login with the new password succeeds', async () => {
+    await patch(
+      '/auth/password',
+      { currentPassword: 'password123', newPassword: 'newpassword123' },
+      { Authorization: `Bearer ${accessToken}` },
+    )
+    const res = await post('/auth/login', { email: 'alice@example.com', password: 'newpassword123' })
+    expect(res.status).toBe(200)
+  })
+
+  it('after a successful change, login with the old password now returns 401', async () => {
+    await patch(
+      '/auth/password',
+      { currentPassword: 'password123', newPassword: 'newpassword123' },
+      { Authorization: `Bearer ${accessToken}` },
+    )
+    const res = await post('/auth/login', { email: 'alice@example.com', password: 'password123' })
+    expect(res.status).toBe(401)
+  })
+
+  it('invalidates a pre-existing refresh session after the password change', async () => {
+    expect(refreshTokenCookie).not.toBe('')
+    await patch(
+      '/auth/password',
+      { currentPassword: 'password123', newPassword: 'newpassword123' },
+      { Authorization: `Bearer ${accessToken}` },
+    )
+
+    const res = await app.request('/auth/refresh', {
+      method: 'POST',
+      headers: { Cookie: `schloss_refresh=${refreshTokenCookie}` },
+    })
+    expect(res.status).toBe(401)
+  })
+})
+
+describe('DELETE /auth/account', () => {
+  let accessToken: string
+  let refreshTokenCookie: string
+
+  beforeEach(async () => {
+    await post('/auth/register', {
+      email: 'alice@example.com',
+      password: 'password123',
+      name: 'Alice',
+    })
+    const loginRes = await post('/auth/login', {
+      email: 'alice@example.com',
+      password: 'password123',
+    })
+    const body = await loginRes.json() as Record<string, unknown>
+    accessToken = body['accessToken'] as string
+    refreshTokenCookie = getCookieValue(loginRes, 'schloss_refresh') ?? ''
+  })
+
+  it('returns 401 when Authorization header is missing', async () => {
+    const res = await del('/auth/account', { password: 'password123' })
+    expect(res.status).toBe(401)
+  })
+
+  it('returns 401 for a garbage Bearer token', async () => {
+    const res = await del(
+      '/auth/account',
+      { password: 'password123' },
+      { Authorization: 'Bearer thisisnotavalidtoken' },
+    )
+    expect(res.status).toBe(401)
+  })
+
+  it('returns 401 for a tampered token', async () => {
+    const parts = accessToken.split('.')
+    const sig = parts[2]!
+    const mid = Math.floor(sig.length / 2)
+    const tamperedChar = sig[mid] === 'A' ? 'B' : 'A'
+    const tamperedSig = sig.slice(0, mid) + tamperedChar + sig.slice(mid + 1)
+    const tampered = `${parts[0]}.${parts[1]}.${tamperedSig}`
+
+    const res = await del(
+      '/auth/account',
+      { password: 'password123' },
+      { Authorization: `Bearer ${tampered}` },
+    )
+    expect(res.status).toBe(401)
+  })
+
+  it('returns 401 for expired access token', async () => {
+    vi.useFakeTimers()
+    try {
+      vi.advanceTimersByTime(16 * 60 * 1000)
+      const res = await del(
+        '/auth/account',
+        { password: 'password123' },
+        { Authorization: `Bearer ${accessToken}` },
+      )
+      expect(res.status).toBe(401)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('returns 400 or 422 for missing password field', async () => {
+    const res = await del('/auth/account', {}, { Authorization: `Bearer ${accessToken}` })
+    expect([400, 422]).toContain(res.status)
+  })
+
+  it('returns 401 with { error: "Invalid password" } when password is wrong, and does not delete the account', async () => {
+    const res = await del(
+      '/auth/account',
+      { password: 'wrongpassword' },
+      { Authorization: `Bearer ${accessToken}` },
+    )
+    expect(res.status).toBe(401)
+    const body = await res.json() as Record<string, unknown>
+    expect(body['error']).toBe('Invalid password')
+
+    // Prove the account is still intact: the same still-valid access token
+    // continues to work.
+    const meRes = await app.request('/auth/me', {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    })
+    expect(meRes.status).toBe(200)
+  })
+
+  it('returns 200 with { ok: true } on success', async () => {
+    const res = await del(
+      '/auth/account',
+      { password: 'password123' },
+      { Authorization: `Bearer ${accessToken}` },
+    )
+    expect(res.status).toBe(200)
+    const body = await res.json() as Record<string, unknown>
+    expect(body['ok']).toBe(true)
+  })
+
+  it('after deletion, a fresh register with the same email succeeds', async () => {
+    await del(
+      '/auth/account',
+      { password: 'password123' },
+      { Authorization: `Bearer ${accessToken}` },
+    )
+    const res = await post('/auth/register', {
+      email: 'alice@example.com',
+      password: 'password123',
+      name: 'Alice',
+    })
+    expect(res.status).toBe(201)
+  })
+
+  it('after deletion, login with the original credentials returns 401', async () => {
+    await del(
+      '/auth/account',
+      { password: 'password123' },
+      { Authorization: `Bearer ${accessToken}` },
+    )
+    const res = await post('/auth/login', { email: 'alice@example.com', password: 'password123' })
+    expect(res.status).toBe(401)
+  })
+
+  it('invalidates a pre-existing refresh session', async () => {
+    expect(refreshTokenCookie).not.toBe('')
+    await del(
+      '/auth/account',
+      { password: 'password123' },
+      { Authorization: `Bearer ${accessToken}` },
+    )
+
+    const res = await app.request('/auth/refresh', {
+      method: 'POST',
+      headers: { Cookie: `schloss_refresh=${refreshTokenCookie}` },
+    })
+    expect(res.status).toBe(401)
+  })
+
+  it('clears the schloss_refresh cookie in the response', async () => {
+    const res = await del(
+      '/auth/account',
+      { password: 'password123' },
+      { Authorization: `Bearer ${accessToken}` },
+    )
+    const raw = getRawCookie(res, 'schloss_refresh')
+    expect(raw).not.toBeNull()
+    const isCleared =
+      raw!.includes('Max-Age=0') ||
+      raw!.includes('max-age=0') ||
+      raw!.includes('Expires=Thu, 01 Jan 1970') ||
+      raw!.match(/schloss_refresh=;/) !== null ||
+      raw!.match(/schloss_refresh=$/) !== null
+    expect(isCleared).toBe(true)
+  })
+
+  it('does not affect a second, independently registered user', async () => {
+    await post('/auth/register', { email: 'bob@example.com', password: 'bobpassword', name: 'Bob' })
+    const bobLogin = await post('/auth/login', { email: 'bob@example.com', password: 'bobpassword' })
+    const bobBody = await bobLogin.json() as Record<string, unknown>
+    const bobToken = bobBody['accessToken'] as string
+
+    const delRes = await del(
+      '/auth/account',
+      { password: 'password123' },
+      { Authorization: `Bearer ${accessToken}` },
+    )
+    expect(delRes.status).toBe(200)
+
+    const bobMe = await app.request('/auth/me', {
+      headers: { Authorization: `Bearer ${bobToken}` },
+    })
+    expect(bobMe.status).toBe(200)
+    const bobMeBody = await bobMe.json() as Record<string, unknown>
+    expect(bobMeBody['email']).toBe('bob@example.com')
   })
 })

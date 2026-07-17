@@ -51,6 +51,15 @@ const tokenSchema = z.object({
   codeVerifier: z.string().regex(/^[A-Za-z0-9_-]{43,128}$/),
 })
 
+const changePasswordSchema = z.object({
+  currentPassword: z.string().min(1),
+  newPassword: z.string().min(8).max(128),
+})
+
+const deleteAccountSchema = z.object({
+  password: z.string().min(1),
+})
+
 // Optional body for POST /refresh - lets schlussel's own login page check
 // for an existing session before ever showing the credentials form (see
 // the /refresh handler below). Every existing caller sends no body at
@@ -116,6 +125,22 @@ async function issueAuthCode(userId: string, codeChallenge: string): Promise<str
     createdAt: new Date(),
   })
   return code
+}
+
+// Shared by /password and /account below - both need "who is making this
+// request", the same check /me already does inline. Kept private to this
+// module rather than also refactoring /me onto it, to avoid touching a
+// working, already-tested code path for an unrelated change.
+async function authenticateBearer(c: { req: { header: (name: string) => string | undefined } }): Promise<User | null> {
+  const authHeader = c.req.header('Authorization')
+  if (!authHeader?.startsWith('Bearer ')) return null
+  try {
+    const payload = await verifyToken(authHeader.slice(7))
+    const user = await db.select().from(users).where(eq(users.id, payload.sub)).get()
+    return user ?? null
+  } catch {
+    return null
+  }
 }
 
 export const authRouter = new Hono()
@@ -291,6 +316,53 @@ authRouter.get('/me', async (c) => {
   } catch {
     return c.json({ error: 'Invalid token' }, 401)
   }
+})
+
+// Unified account settings - shared by every consumer app (see
+// schlussel/web's AccountPage), not a kuvert/schloss-specific concept.
+// Only ever called same-origin from that page, so - like the no-PKCE
+// branch of /login above - always trusted: safe to unconditionally set a
+// fresh session cookie here without an isTrustedOrigin gate.
+authRouter.patch('/password', zValidator('json', changePasswordSchema), async (c) => {
+  const user = await authenticateBearer(c)
+  if (!user) return c.json({ error: 'Unauthorized' }, 401)
+
+  const { currentPassword, newPassword } = c.req.valid('json')
+  if (!(await verifyPassword(currentPassword, user.passwordHash))) {
+    return c.json({ error: 'Invalid current password' }, 401)
+  }
+
+  await db.update(users).set({ passwordHash: await hashPassword(newPassword) }).where(eq(users.id, user.id))
+
+  // A changed password invalidates every other session on every service -
+  // standard practice for "someone else might have had this password".
+  // Re-establish only this browser's own session right after, so the
+  // account page that just made this request doesn't immediately find
+  // itself logged out too.
+  await db.delete(refreshTokens).where(eq(refreshTokens.userId, user.id))
+  await establishSession(c, user.id)
+
+  return c.json({ ok: true })
+})
+
+authRouter.delete('/account', zValidator('json', deleteAccountSchema), async (c) => {
+  const user = await authenticateBearer(c)
+  if (!user) return c.json({ error: 'Unauthorized' }, 401)
+
+  const { password } = c.req.valid('json')
+  if (!(await verifyPassword(password, user.passwordHash))) {
+    return c.json({ error: 'Invalid password' }, 401)
+  }
+
+  // Cascades refresh_tokens and auth_codes (see schema.ts's onDelete:
+  // 'cascade' on both, and foreign_keys=ON in db/index.ts) - no manual
+  // cleanup needed here. Other services' own local copies of this user's
+  // id are left as-is; without a valid session they can never be issued
+  // a new token again, which is what actually locks them out.
+  await db.delete(users).where(eq(users.id, user.id))
+  clearCookie(c)
+
+  return c.json({ ok: true })
 })
 
 // Helpers — cookie management without external deps
