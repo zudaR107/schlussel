@@ -1353,3 +1353,565 @@ describe('DELETE /auth/account', () => {
     expect(bobMeBody['email']).toBe('bob@example.com')
   })
 })
+
+// ── Session management: PATCH /auth/name, GET/DELETE /auth/sessions ────────
+
+/** True when a raw Set-Cookie string represents a cleared cookie (same check
+ * used by the existing POST /auth/logout and DELETE /auth/account tests). */
+function isCookieCleared(raw: string): boolean {
+  return (
+    raw.includes('Max-Age=0') ||
+    raw.includes('max-age=0') ||
+    raw.includes('Expires=Thu, 01 Jan 1970') ||
+    raw.match(/schloss_refresh=;/) !== null ||
+    raw.match(/schloss_refresh=$/) !== null
+  )
+}
+
+function getSessions(accessToken: string, refreshCookie?: string) {
+  const headers: Record<string, string> = { Authorization: `Bearer ${accessToken}` }
+  if (refreshCookie) headers['Cookie'] = `schloss_refresh=${refreshCookie}`
+  return app.request('/auth/sessions', { headers })
+}
+
+function deleteSession(id: string, accessToken: string, refreshCookie?: string) {
+  const headers: Record<string, string> = { Authorization: `Bearer ${accessToken}` }
+  if (refreshCookie) headers['Cookie'] = `schloss_refresh=${refreshCookie}`
+  return app.request(`/auth/sessions/${id}`, { method: 'DELETE', headers })
+}
+
+function deleteAllSessions(accessToken: string, refreshCookie?: string) {
+  const headers: Record<string, string> = { Authorization: `Bearer ${accessToken}` }
+  if (refreshCookie) headers['Cookie'] = `schloss_refresh=${refreshCookie}`
+  return app.request('/auth/sessions', { method: 'DELETE', headers })
+}
+
+describe('PATCH /auth/name', () => {
+  let accessToken: string
+
+  beforeEach(async () => {
+    await post('/auth/register', {
+      email: 'alice@example.com',
+      password: 'password123',
+      name: 'Alice',
+    })
+    const loginRes = await post('/auth/login', {
+      email: 'alice@example.com',
+      password: 'password123',
+    })
+    const body = await loginRes.json() as Record<string, unknown>
+    accessToken = body['accessToken'] as string
+  })
+
+  it('returns 401 when Authorization header is missing', async () => {
+    const res = await patch('/auth/name', { name: 'Alicia' })
+    expect(res.status).toBe(401)
+  })
+
+  it('returns 401 for a garbage Bearer token', async () => {
+    const res = await patch(
+      '/auth/name',
+      { name: 'Alicia' },
+      { Authorization: 'Bearer thisisnotavalidtoken' },
+    )
+    expect(res.status).toBe(401)
+  })
+
+  it('returns 401 for a tampered token', async () => {
+    const parts = accessToken.split('.')
+    const sig = parts[2]!
+    const mid = Math.floor(sig.length / 2)
+    const tamperedChar = sig[mid] === 'A' ? 'B' : 'A'
+    const tamperedSig = sig.slice(0, mid) + tamperedChar + sig.slice(mid + 1)
+    const tampered = `${parts[0]}.${parts[1]}.${tamperedSig}`
+
+    const res = await patch(
+      '/auth/name',
+      { name: 'Alicia' },
+      { Authorization: `Bearer ${tampered}` },
+    )
+    expect(res.status).toBe(401)
+  })
+
+  it('returns 401 for expired access token', async () => {
+    vi.useFakeTimers()
+    try {
+      vi.advanceTimersByTime(16 * 60 * 1000)
+      const res = await patch(
+        '/auth/name',
+        { name: 'Alicia' },
+        { Authorization: `Bearer ${accessToken}` },
+      )
+      expect(res.status).toBe(401)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('returns 400 or 422 for empty name', async () => {
+    const res = await patch('/auth/name', { name: '' }, { Authorization: `Bearer ${accessToken}` })
+    expect([400, 422]).toContain(res.status)
+  })
+
+  it('returns 400 or 422 for missing name field', async () => {
+    const res = await patch('/auth/name', {}, { Authorization: `Bearer ${accessToken}` })
+    expect([400, 422]).toContain(res.status)
+  })
+
+  it('returns 400 or 422 for name longer than 100 characters', async () => {
+    const res = await patch(
+      '/auth/name',
+      { name: 'a'.repeat(101) },
+      { Authorization: `Bearer ${accessToken}` },
+    )
+    expect([400, 422]).toContain(res.status)
+  })
+
+  it('accepts name of exactly 100 characters', async () => {
+    const res = await patch(
+      '/auth/name',
+      { name: 'a'.repeat(100) },
+      { Authorization: `Bearer ${accessToken}` },
+    )
+    expect(res.status).toBe(200)
+  })
+
+  it('returns 200 with the updated user object, email and role unchanged', async () => {
+    const res = await patch(
+      '/auth/name',
+      { name: 'Alicia' },
+      { Authorization: `Bearer ${accessToken}` },
+    )
+    expect(res.status).toBe(200)
+    const body = await res.json() as Record<string, unknown>
+    expect(body['name']).toBe('Alicia')
+    expect(body['email']).toBe('alice@example.com')
+    expect(['admin', 'user']).toContain(body['role'])
+    expect(typeof body['id']).toBe('string')
+  })
+
+  it('GET /auth/me reflects the new name afterward', async () => {
+    await patch('/auth/name', { name: 'Alicia' }, { Authorization: `Bearer ${accessToken}` })
+    const meRes = await app.request('/auth/me', { headers: { Authorization: `Bearer ${accessToken}` } })
+    expect(meRes.status).toBe(200)
+    const meBody = await meRes.json() as Record<string, unknown>
+    expect(meBody['name']).toBe('Alicia')
+  })
+
+  it('leaves password and email untouched — a fresh login with the original password still works', async () => {
+    await patch('/auth/name', { name: 'Alicia' }, { Authorization: `Bearer ${accessToken}` })
+    const res = await post('/auth/login', { email: 'alice@example.com', password: 'password123' })
+    expect(res.status).toBe(200)
+    const body = await res.json() as Record<string, unknown>
+    const user = body['user'] as Record<string, unknown>
+    expect(user['email']).toBe('alice@example.com')
+    expect(user['name']).toBe('Alicia')
+  })
+
+  it('does not affect a second, independently registered user', async () => {
+    await post('/auth/register', { email: 'bob@example.com', password: 'bobpassword', name: 'Bob' })
+    const bobLogin = await post('/auth/login', { email: 'bob@example.com', password: 'bobpassword' })
+    const bobBody = await bobLogin.json() as Record<string, unknown>
+    const bobToken = bobBody['accessToken'] as string
+
+    await patch('/auth/name', { name: 'Alicia' }, { Authorization: `Bearer ${accessToken}` })
+
+    const bobMe = await app.request('/auth/me', { headers: { Authorization: `Bearer ${bobToken}` } })
+    expect(bobMe.status).toBe(200)
+    const bobMeBody = await bobMe.json() as Record<string, unknown>
+    expect(bobMeBody['name']).toBe('Bob')
+  })
+})
+
+describe('GET /auth/sessions', () => {
+  it('returns 401 when Authorization header is missing', async () => {
+    const res = await app.request('/auth/sessions')
+    expect(res.status).toBe(401)
+  })
+
+  it('returns 401 for a garbage Bearer token', async () => {
+    const res = await app.request('/auth/sessions', {
+      headers: { Authorization: 'Bearer thisisnotavalidtoken' },
+    })
+    expect(res.status).toBe(401)
+  })
+
+  it('returns 200 with an array containing the session, with the expected shape', async () => {
+    await post('/auth/register', { email: 'alice@example.com', password: 'password123', name: 'Alice' })
+    const loginRes = await post(
+      '/auth/login',
+      { email: 'alice@example.com', password: 'password123' },
+      { 'User-Agent': 'TestBrowser/1.0', 'X-Forwarded-For': '203.0.113.5' },
+    )
+    const loginBody = await loginRes.json() as Record<string, unknown>
+    const accessToken = loginBody['accessToken'] as string
+
+    const res = await getSessions(accessToken)
+    expect(res.status).toBe(200)
+    const body = await res.json() as Record<string, unknown>[]
+    expect(Array.isArray(body)).toBe(true)
+    expect(body.length).toBe(1)
+    const session = body[0]!
+    expect(typeof session['id']).toBe('string')
+    expect(session['userAgent']).toBe('TestBrowser/1.0')
+    expect(session['ipAddress']).toBe('203.0.113.5')
+    expect(typeof session['createdAt']).toBe('string')
+    expect(new Date(session['createdAt'] as string).toString()).not.toBe('Invalid Date')
+    expect(typeof session['expiresAt']).toBe('string')
+    expect(new Date(session['expiresAt'] as string).toString()).not.toBe('Invalid Date')
+    expect(typeof session['current']).toBe('boolean')
+  })
+
+  it('ipAddress is null when the login request had no X-Forwarded-For header', async () => {
+    await post('/auth/register', { email: 'alice@example.com', password: 'password123', name: 'Alice' })
+    const loginRes = await post('/auth/login', { email: 'alice@example.com', password: 'password123' })
+    const loginBody = await loginRes.json() as Record<string, unknown>
+    const accessToken = loginBody['accessToken'] as string
+
+    const res = await getSessions(accessToken)
+    const body = await res.json() as Record<string, unknown>[]
+    expect(body.length).toBe(1)
+    expect(body[0]!['ipAddress']).toBeNull()
+  })
+
+  it('only returns sessions belonging to the calling user', async () => {
+    await post('/auth/register', { email: 'alice@example.com', password: 'password123', name: 'Alice' })
+    await post('/auth/register', { email: 'bob@example.com', password: 'bobpassword', name: 'Bob' })
+    const aliceLogin = await post('/auth/login', { email: 'alice@example.com', password: 'password123' })
+    const bobLogin = await post('/auth/login', { email: 'bob@example.com', password: 'bobpassword' })
+    const aliceBody = await aliceLogin.json() as Record<string, unknown>
+    const bobBody = await bobLogin.json() as Record<string, unknown>
+    const aliceToken = aliceBody['accessToken'] as string
+    const bobToken = bobBody['accessToken'] as string
+
+    const aliceRes = await getSessions(aliceToken)
+    const bobRes = await getSessions(bobToken)
+    const aliceSessions = await aliceRes.json() as Record<string, unknown>[]
+    const bobSessions = await bobRes.json() as Record<string, unknown>[]
+
+    expect(aliceSessions.length).toBe(1)
+    expect(bobSessions.length).toBe(1)
+    expect(aliceSessions[0]!['id']).not.toBe(bobSessions[0]!['id'])
+  })
+
+  it('marks only the row matching the sent cookie as current: true', async () => {
+    await post('/auth/register', { email: 'alice@example.com', password: 'password123', name: 'Alice' })
+    const login1 = await post('/auth/login', { email: 'alice@example.com', password: 'password123' })
+    const login2 = await post('/auth/login', { email: 'alice@example.com', password: 'password123' })
+    const login1Body = await login1.json() as Record<string, unknown>
+    const accessToken = login1Body['accessToken'] as string
+    const cookie1 = getCookieValue(login1, 'schloss_refresh') ?? ''
+    const cookie2 = getCookieValue(login2, 'schloss_refresh') ?? ''
+    expect(cookie1).not.toBe('')
+    expect(cookie2).not.toBe('')
+    expect(cookie1).not.toBe(cookie2)
+
+    const res = await getSessions(accessToken, cookie1)
+    const sessions = await res.json() as Record<string, unknown>[]
+    expect(sessions.length).toBe(2)
+    const currentRows = sessions.filter((s) => s['current'] === true)
+    const notCurrentRows = sessions.filter((s) => s['current'] === false)
+    expect(currentRows.length).toBe(1)
+    expect(notCurrentRows.length).toBe(1)
+  })
+
+  it('every row has current: false when no cookie is sent', async () => {
+    await post('/auth/register', { email: 'alice@example.com', password: 'password123', name: 'Alice' })
+    const login1 = await post('/auth/login', { email: 'alice@example.com', password: 'password123' })
+    await post('/auth/login', { email: 'alice@example.com', password: 'password123' })
+    const login1Body = await login1.json() as Record<string, unknown>
+    const accessToken = login1Body['accessToken'] as string
+
+    const res = await getSessions(accessToken)
+    const sessions = await res.json() as Record<string, unknown>[]
+    expect(sessions.length).toBe(2)
+    for (const s of sessions) expect(s['current']).toBe(false)
+  })
+
+  it('two logins for the same user produce two distinct rows', async () => {
+    await post('/auth/register', { email: 'alice@example.com', password: 'password123', name: 'Alice' })
+    const login1 = await post('/auth/login', { email: 'alice@example.com', password: 'password123' })
+    await post('/auth/login', { email: 'alice@example.com', password: 'password123' })
+    const login1Body = await login1.json() as Record<string, unknown>
+    const accessToken = login1Body['accessToken'] as string
+
+    const res = await getSessions(accessToken)
+    const sessions = await res.json() as Record<string, unknown>[]
+    expect(sessions.length).toBe(2)
+    const ids = new Set(sessions.map((s) => s['id']))
+    expect(ids.size).toBe(2)
+  })
+
+  it('does not return an already-expired session', async () => {
+    const registerRes = await post('/auth/register', {
+      email: 'alice@example.com',
+      password: 'password123',
+      name: 'Alice',
+    })
+    const registerBody = await registerRes.json() as Record<string, unknown>
+    const userId = registerBody['id'] as string
+    const loginRes = await post('/auth/login', { email: 'alice@example.com', password: 'password123' })
+    const loginBody = await loginRes.json() as Record<string, unknown>
+    const accessToken = loginBody['accessToken'] as string
+
+    // Simulate a session whose expiry has already passed but has not yet
+    // been cleaned up from the table.
+    sqlite
+      .prepare('UPDATE refresh_tokens SET expires_at = ? WHERE user_id = ?')
+      .run(Math.floor(Date.now() / 1000) - 3600, userId)
+
+    const res = await getSessions(accessToken)
+    expect(res.status).toBe(200)
+    const sessions = await res.json() as Record<string, unknown>[]
+    expect(sessions.length).toBe(0)
+  })
+})
+
+describe('DELETE /auth/sessions/:id', () => {
+  it('returns 401 when Authorization header is missing', async () => {
+    const res = await app.request('/auth/sessions/does-not-matter', { method: 'DELETE' })
+    expect(res.status).toBe(401)
+  })
+
+  it('returns 401 for a garbage Bearer token', async () => {
+    const res = await app.request('/auth/sessions/does-not-matter', {
+      method: 'DELETE',
+      headers: { Authorization: 'Bearer thisisnotavalidtoken' },
+    })
+    expect(res.status).toBe(401)
+  })
+
+  it('returns 404 for a nonexistent session id and deletes nothing', async () => {
+    await post('/auth/register', { email: 'alice@example.com', password: 'password123', name: 'Alice' })
+    const loginRes = await post('/auth/login', { email: 'alice@example.com', password: 'password123' })
+    const loginBody = await loginRes.json() as Record<string, unknown>
+    const accessToken = loginBody['accessToken'] as string
+
+    const res = await deleteSession(randomUUID(), accessToken)
+    expect(res.status).toBe(404)
+
+    const sessions = await (await getSessions(accessToken)).json() as Record<string, unknown>[]
+    expect(sessions.length).toBe(1)
+  })
+
+  it('returns 404 when the id belongs to a different user, and does not delete it', async () => {
+    await post('/auth/register', { email: 'alice@example.com', password: 'password123', name: 'Alice' })
+    await post('/auth/register', { email: 'bob@example.com', password: 'bobpassword', name: 'Bob' })
+    const aliceLogin = await post('/auth/login', { email: 'alice@example.com', password: 'password123' })
+    const bobLogin = await post('/auth/login', { email: 'bob@example.com', password: 'bobpassword' })
+    const aliceBody = await aliceLogin.json() as Record<string, unknown>
+    const bobBody = await bobLogin.json() as Record<string, unknown>
+    const aliceToken = aliceBody['accessToken'] as string
+    const bobToken = bobBody['accessToken'] as string
+    const aliceCookie = getCookieValue(aliceLogin, 'schloss_refresh') ?? ''
+
+    const aliceSessions = await (await getSessions(aliceToken)).json() as Record<string, unknown>[]
+    const aliceSessionId = aliceSessions[0]!['id'] as string
+
+    // Bob tries to revoke Alice's session by id.
+    const res = await deleteSession(aliceSessionId, bobToken)
+    expect(res.status).toBe(404)
+
+    // Alice's session is still listed...
+    const aliceSessionsAfter = await (await getSessions(aliceToken)).json() as Record<string, unknown>[]
+    expect(aliceSessionsAfter.length).toBe(1)
+
+    // ...and still usable via refresh.
+    await new Promise((r) => setTimeout(r, 1100))
+    const refreshRes = await app.request('/auth/refresh', {
+      method: 'POST',
+      headers: { Cookie: `schloss_refresh=${aliceCookie}` },
+    })
+    expect(refreshRes.status).toBe(200)
+  })
+
+  it('on success, returns 200 with { ok: true } and revokes only that session', async () => {
+    await post('/auth/register', { email: 'alice@example.com', password: 'password123', name: 'Alice' })
+    const login1 = await post('/auth/login', { email: 'alice@example.com', password: 'password123' })
+    const login2 = await post('/auth/login', { email: 'alice@example.com', password: 'password123' })
+    const login1Body = await login1.json() as Record<string, unknown>
+    const accessToken = login1Body['accessToken'] as string
+    const cookie1 = getCookieValue(login1, 'schloss_refresh') ?? ''
+    const cookie2 = getCookieValue(login2, 'schloss_refresh') ?? ''
+
+    const sessions = await (await getSessions(accessToken, cookie1)).json() as Record<string, unknown>[]
+    const session1 = sessions.find((s) => s['current'] === true)!
+    const session1Id = session1['id'] as string
+
+    const res = await deleteSession(session1Id, accessToken, cookie1)
+    expect(res.status).toBe(200)
+    const body = await res.json() as Record<string, unknown>
+    expect(body['ok']).toBe(true)
+
+    // The revoked session's cookie no longer refreshes.
+    const refresh1 = await app.request('/auth/refresh', {
+      method: 'POST',
+      headers: { Cookie: `schloss_refresh=${cookie1}` },
+    })
+    expect(refresh1.status).toBe(401)
+
+    // The other session is unaffected.
+    await new Promise((r) => setTimeout(r, 1100))
+    const refresh2 = await app.request('/auth/refresh', {
+      method: 'POST',
+      headers: { Cookie: `schloss_refresh=${cookie2}` },
+    })
+    expect(refresh2.status).toBe(200)
+  })
+
+  it('clears the schloss_refresh cookie when the revoked session matches the cookie sent with the request', async () => {
+    await post('/auth/register', { email: 'alice@example.com', password: 'password123', name: 'Alice' })
+    const login1 = await post('/auth/login', { email: 'alice@example.com', password: 'password123' })
+    const login1Body = await login1.json() as Record<string, unknown>
+    const accessToken = login1Body['accessToken'] as string
+    const cookie1 = getCookieValue(login1, 'schloss_refresh') ?? ''
+
+    const sessions = await (await getSessions(accessToken, cookie1)).json() as Record<string, unknown>[]
+    const sessionId = sessions[0]!['id'] as string
+
+    const res = await deleteSession(sessionId, accessToken, cookie1)
+    expect(res.status).toBe(200)
+
+    const raw = getRawCookie(res, 'schloss_refresh')
+    expect(raw).not.toBeNull()
+    expect(isCookieCleared(raw!)).toBe(true)
+  })
+
+  it('leaves the request cookie untouched when the revoked session is a different session for the same user', async () => {
+    await post('/auth/register', { email: 'alice@example.com', password: 'password123', name: 'Alice' })
+    const login1 = await post('/auth/login', { email: 'alice@example.com', password: 'password123' })
+    const login2 = await post('/auth/login', { email: 'alice@example.com', password: 'password123' })
+    const login1Body = await login1.json() as Record<string, unknown>
+    const accessToken = login1Body['accessToken'] as string
+    const cookie1 = getCookieValue(login1, 'schloss_refresh') ?? ''
+    const cookie2 = getCookieValue(login2, 'schloss_refresh') ?? ''
+
+    const sessions = await (await getSessions(accessToken, cookie1)).json() as Record<string, unknown>[]
+    const otherSession = sessions.find((s) => s['current'] === false)!
+    const otherSessionId = otherSession['id'] as string
+
+    // The request carries cookie1 (the caller's own current session) but
+    // targets the OTHER session (cookie2's row).
+    const res = await deleteSession(otherSessionId, accessToken, cookie1)
+    expect(res.status).toBe(200)
+
+    const raw = getRawCookie(res, 'schloss_refresh')
+    if (raw !== null) {
+      expect(isCookieCleared(raw)).toBe(false)
+    }
+
+    // cookie1 (the caller's own session) is still fully usable.
+    await new Promise((r) => setTimeout(r, 1100))
+    const refresh1 = await app.request('/auth/refresh', {
+      method: 'POST',
+      headers: { Cookie: `schloss_refresh=${cookie1}` },
+    })
+    expect(refresh1.status).toBe(200)
+
+    // cookie2 (the revoked session) no longer works.
+    const refresh2 = await app.request('/auth/refresh', {
+      method: 'POST',
+      headers: { Cookie: `schloss_refresh=${cookie2}` },
+    })
+    expect(refresh2.status).toBe(401)
+  })
+})
+
+describe('DELETE /auth/sessions', () => {
+  it('returns 401 when Authorization header is missing', async () => {
+    const res = await app.request('/auth/sessions', { method: 'DELETE' })
+    expect(res.status).toBe(401)
+  })
+
+  it('returns 401 for a garbage Bearer token', async () => {
+    const res = await app.request('/auth/sessions', {
+      method: 'DELETE',
+      headers: { Authorization: 'Bearer thisisnotavalidtoken' },
+    })
+    expect(res.status).toBe(401)
+  })
+
+  it('invalidates every session for the calling user, including the one used to make the request', async () => {
+    await post('/auth/register', { email: 'alice@example.com', password: 'password123', name: 'Alice' })
+    const login1 = await post('/auth/login', { email: 'alice@example.com', password: 'password123' })
+    const login2 = await post('/auth/login', { email: 'alice@example.com', password: 'password123' })
+    const login1Body = await login1.json() as Record<string, unknown>
+    const accessToken = login1Body['accessToken'] as string
+    const cookie1 = getCookieValue(login1, 'schloss_refresh') ?? ''
+    const cookie2 = getCookieValue(login2, 'schloss_refresh') ?? ''
+
+    const res = await deleteAllSessions(accessToken, cookie1)
+    expect(res.status).toBe(200)
+
+    const refresh1 = await app.request('/auth/refresh', {
+      method: 'POST',
+      headers: { Cookie: `schloss_refresh=${cookie1}` },
+    })
+    expect(refresh1.status).toBe(401)
+
+    const refresh2 = await app.request('/auth/refresh', {
+      method: 'POST',
+      headers: { Cookie: `schloss_refresh=${cookie2}` },
+    })
+    expect(refresh2.status).toBe(401)
+  })
+
+  it('clears the callers own cookie even when no cookie was sent with the request', async () => {
+    await post('/auth/register', { email: 'alice@example.com', password: 'password123', name: 'Alice' })
+    const loginRes = await post('/auth/login', { email: 'alice@example.com', password: 'password123' })
+    const loginBody = await loginRes.json() as Record<string, unknown>
+    const accessToken = loginBody['accessToken'] as string
+
+    const res = await deleteAllSessions(accessToken)
+    expect(res.status).toBe(200)
+
+    const raw = getRawCookie(res, 'schloss_refresh')
+    expect(raw).not.toBeNull()
+    expect(isCookieCleared(raw!)).toBe(true)
+  })
+
+  it('does not set a fresh session cookie — the caller ends up fully logged out', async () => {
+    await post('/auth/register', { email: 'alice@example.com', password: 'password123', name: 'Alice' })
+    const loginRes = await post('/auth/login', { email: 'alice@example.com', password: 'password123' })
+    const loginBody = await loginRes.json() as Record<string, unknown>
+    const accessToken = loginBody['accessToken'] as string
+    const cookie = getCookieValue(loginRes, 'schloss_refresh') ?? ''
+
+    const res = await deleteAllSessions(accessToken, cookie)
+    expect(res.status).toBe(200)
+
+    // Either no cookie value at all, or an empty (cleared) one — never a
+    // fresh, usable token.
+    const newCookie = getCookieValue(res, 'schloss_refresh')
+    expect(newCookie === null || newCookie === '').toBe(true)
+  })
+
+  it('does not affect a different users sessions', async () => {
+    await post('/auth/register', { email: 'alice@example.com', password: 'password123', name: 'Alice' })
+    await post('/auth/register', { email: 'bob@example.com', password: 'bobpassword', name: 'Bob' })
+    const aliceLogin = await post('/auth/login', { email: 'alice@example.com', password: 'password123' })
+    const bobLogin = await post('/auth/login', { email: 'bob@example.com', password: 'bobpassword' })
+    const aliceBody = await aliceLogin.json() as Record<string, unknown>
+    const bobBody = await bobLogin.json() as Record<string, unknown>
+    const aliceToken = aliceBody['accessToken'] as string
+    const bobToken = bobBody['accessToken'] as string
+    const bobCookie = getCookieValue(bobLogin, 'schloss_refresh') ?? ''
+
+    const res = await deleteAllSessions(aliceToken)
+    expect(res.status).toBe(200)
+
+    // Bob's session list is unchanged.
+    const bobSessions = await (await getSessions(bobToken)).json() as Record<string, unknown>[]
+    expect(bobSessions.length).toBe(1)
+
+    // ...and his cookie still refreshes fine (trusted, so as not to
+    // silently consume the session — see the "trusted origin gate" tests
+    // above for why an untrusted refresh alone wouldn't prove this).
+    await new Promise((r) => setTimeout(r, 1100))
+    const bobRefresh = await app.request('/auth/refresh', {
+      method: 'POST',
+      headers: { Cookie: `schloss_refresh=${bobCookie}`, ...TRUSTED_HEADER },
+    })
+    expect(bobRefresh.status).toBe(200)
+  })
+})

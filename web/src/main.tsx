@@ -4,7 +4,7 @@ import { LoginPage } from './features/auth/LoginPage'
 import { RegisterPage } from './features/auth/RegisterPage'
 import { LogoutPage } from './features/auth/LogoutPage'
 import { AccountPage } from './features/account/AccountPage'
-import { applyTheme, getStoredTheme } from './lib/theme'
+import { applyTheme, getStoredTheme } from '@zudar107/schloss-ui'
 import './index.css'
 
 applyTheme(getStoredTheme())

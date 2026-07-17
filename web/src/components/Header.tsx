@@ -1,4 +1,4 @@
-import { Header as SharedHeader, type HeaderUser } from '@zudar107/schloss-ui'
+import { Header as SharedHeader, ThemeToggle, type HeaderUser } from '@zudar107/schloss-ui'
 import { DEFAULT_APP_URL } from '../lib/returnTo'
 
 interface HeaderProps {
@@ -28,6 +28,7 @@ export function Header({ user, onLogout }: HeaderProps = {}) {
       homeTitle="На главную"
       user={user}
       onLogout={onLogout}
+      rightSlot={<ThemeToggle />}
     />
   )
 }

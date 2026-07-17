@@ -1,7 +1,7 @@
 import { Hono } from 'hono'
 import { zValidator } from '@hono/zod-validator'
 import { z } from 'zod'
-import { eq, lt } from 'drizzle-orm'
+import { eq, lt, and } from 'drizzle-orm'
 import { createId } from '@paralleldrive/cuid2'
 import { db } from '../db/index.js'
 import { users, refreshTokens, authCodes, type User } from '../db/schema.js'
@@ -60,6 +60,10 @@ const deleteAccountSchema = z.object({
   password: z.string().min(1),
 })
 
+const nameSchema = z.object({
+  name: z.string().min(1).max(100),
+})
+
 // Optional body for POST /refresh - lets schlussel's own login page check
 // for an existing session before ever showing the credentials form (see
 // the /refresh handler below). Every existing caller sends no body at
@@ -74,15 +78,42 @@ const refreshSchema = z
     { message: 'codeChallenge and codeChallengeMethod must be given together' },
   )
 
+interface RequestMeta {
+  userAgent: string | null
+  ipAddress: string | null
+}
+
+// Minimal shape covering both reading request headers and writing
+// response headers - every real Hono context satisfies this; used
+// instead of the full Hono type so these helpers stay easy to call from
+// anywhere that has a context-like object (including tests).
+type RequestResponseContext = {
+  req: { header: (name: string) => string | undefined }
+  header: (name: string, value: string) => void
+}
+
+// Captured only for display on the account settings page's active-sessions
+// list - x-forwarded-for's first entry is the original client, reasonable
+// behind the platform's own Caddy gateway (see tor/ and each service's own
+// Caddyfile); absent for anything not proxied that way.
+function requestMeta(c: { req: { header: (name: string) => string | undefined } }): RequestMeta {
+  return {
+    userAgent: c.req.header('user-agent') ?? null,
+    ipAddress: c.req.header('x-forwarded-for')?.split(',')[0]?.trim() ?? null,
+  }
+}
+
 // Creates a new refresh token, stores it, and sets it as the httpOnly
 // cookie - the session-establishing side effect shared by every path
 // below that authenticates a user.
-async function establishSession(c: Parameters<typeof setCookieHeader>[0], userId: string): Promise<void> {
+async function establishSession(c: RequestResponseContext, userId: string, meta: RequestMeta): Promise<void> {
   const refreshToken = await signRefreshToken(userId)
   await db.insert(refreshTokens).values({
     id: createId(),
     userId,
     tokenHash: hashToken(refreshToken),
+    userAgent: meta.userAgent,
+    ipAddress: meta.ipAddress,
     expiresAt: new Date(Date.now() + REFRESH_TOKEN_MAX_AGE * 1000),
     createdAt: new Date(),
   })
@@ -95,14 +126,14 @@ async function establishSession(c: Parameters<typeof setCookieHeader>[0], userId
 // (trusted only per isTrustedOrigin, since it's the one endpoint genuinely
 // called through consumer apps' own proxies). Both hand the access token
 // straight back in the response body regardless.
-async function issueSession(c: Parameters<typeof setCookieHeader>[0], user: User, trusted: boolean) {
+async function issueSession(c: RequestResponseContext, user: User, trusted: boolean) {
   const accessToken = await signAccessToken({
     sub: user.id,
     email: user.email,
     name: user.name,
     role: user.role,
   })
-  if (trusted) await establishSession(c, user.id)
+  if (trusted) await establishSession(c, user.id, requestMeta(c))
 
   return {
     accessToken,
@@ -190,7 +221,7 @@ authRouter.post('/login', zValidator('json', loginSchema), async (c) => {
   // /refresh below skip the credentials form entirely the next time any
   // app redirects here.
   if (codeChallenge) {
-    if (isTrustedOrigin(c)) await establishSession(c, user.id)
+    if (isTrustedOrigin(c)) await establishSession(c, user.id, requestMeta(c))
     const code = await issueAuthCode(user.id, codeChallenge)
     return c.json({ code })
   }
@@ -278,7 +309,7 @@ authRouter.post('/refresh', async (c) => {
   const trusted = isTrustedOrigin(c)
 
   if (parsed.data.codeChallenge) {
-    if (trusted) await establishSession(c, user.id)
+    if (trusted) await establishSession(c, user.id, requestMeta(c))
     const code = await issueAuthCode(user.id, parsed.data.codeChallenge)
     return c.json({ code })
   }
@@ -289,7 +320,7 @@ authRouter.post('/refresh', async (c) => {
     name: user.name,
     role: user.role,
   })
-  if (trusted) await establishSession(c, user.id)
+  if (trusted) await establishSession(c, user.id, requestMeta(c))
 
   return c.json({ accessToken: newAccessToken })
 })
@@ -340,7 +371,7 @@ authRouter.patch('/password', zValidator('json', changePasswordSchema), async (c
   // account page that just made this request doesn't immediately find
   // itself logged out too.
   await db.delete(refreshTokens).where(eq(refreshTokens.userId, user.id))
-  await establishSession(c, user.id)
+  await establishSession(c, user.id, requestMeta(c))
 
   return c.json({ ok: true })
 })
@@ -360,6 +391,77 @@ authRouter.delete('/account', zValidator('json', deleteAccountSchema), async (c)
   // id are left as-is; without a valid session they can never be issued
   // a new token again, which is what actually locks them out.
   await db.delete(users).where(eq(users.id, user.id))
+  clearCookie(c)
+
+  return c.json({ ok: true })
+})
+
+authRouter.patch('/name', zValidator('json', nameSchema), async (c) => {
+  const user = await authenticateBearer(c)
+  if (!user) return c.json({ error: 'Unauthorized' }, 401)
+
+  const { name } = c.req.valid('json')
+  await db.update(users).set({ name }).where(eq(users.id, user.id))
+
+  return c.json({ id: user.id, email: user.email, name, role: user.role })
+})
+
+// Active-sessions list for the account settings page. `current` is
+// derived by hashing this request's own cookie (if any) and comparing -
+// the same mechanism /refresh already uses to look a session up.
+authRouter.get('/sessions', async (c) => {
+  const user = await authenticateBearer(c)
+  if (!user) return c.json({ error: 'Unauthorized' }, 401)
+
+  // Lazy cleanup, same pattern as expired auth_codes at POST /token -
+  // scoped to this user so a busy platform never does a full-table scan
+  // just because one person opened their sessions list.
+  await db.delete(refreshTokens).where(and(eq(refreshTokens.userId, user.id), lt(refreshTokens.expiresAt, new Date())))
+
+  const currentCookie = getCookie(c)
+  const currentHash = currentCookie ? hashToken(currentCookie) : null
+
+  const sessions = await db.select().from(refreshTokens).where(eq(refreshTokens.userId, user.id)).all()
+  sessions.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+
+  return c.json(
+    sessions.map((s) => ({
+      id: s.id,
+      userAgent: s.userAgent,
+      ipAddress: s.ipAddress,
+      createdAt: s.createdAt.toISOString(),
+      expiresAt: s.expiresAt.toISOString(),
+      current: s.tokenHash === currentHash,
+    })),
+  )
+})
+
+authRouter.delete('/sessions/:id', async (c) => {
+  const user = await authenticateBearer(c)
+  if (!user) return c.json({ error: 'Unauthorized' }, 401)
+
+  const id = c.req.param('id')
+  // Scoped to userId - not just "delete by id" - so this can't be used to
+  // probe or revoke another user's session by guessing an id.
+  const session = await db.select().from(refreshTokens).where(and(eq(refreshTokens.id, id), eq(refreshTokens.userId, user.id))).get()
+  if (!session) return c.json({ error: 'Session not found' }, 404)
+
+  await db.delete(refreshTokens).where(eq(refreshTokens.id, id))
+
+  const currentCookie = getCookie(c)
+  if (currentCookie && hashToken(currentCookie) === session.tokenHash) clearCookie(c)
+
+  return c.json({ ok: true })
+})
+
+// "Выйти на всех устройствах" - unlike changing the password, this does
+// NOT re-establish a fresh session for the calling browser. Logging out
+// everywhere is supposed to mean everywhere, including here.
+authRouter.delete('/sessions', async (c) => {
+  const user = await authenticateBearer(c)
+  if (!user) return c.json({ error: 'Unauthorized' }, 401)
+
+  await db.delete(refreshTokens).where(eq(refreshTokens.userId, user.id))
   clearCookie(c)
 
   return c.json({ ok: true })
