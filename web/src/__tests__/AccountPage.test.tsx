@@ -7,6 +7,10 @@ const mockFetchMe = vi.fn()
 const mockExchangeCode = vi.fn()
 const mockChangePassword = vi.fn()
 const mockDeleteAccount = vi.fn()
+const mockUpdateName = vi.fn()
+const mockListSessions = vi.fn()
+const mockRevokeSession = vi.fn()
+const mockLogoutEverywhere = vi.fn()
 
 vi.mock('../lib/api', () => ({
   refreshSession: (...args: unknown[]) => mockRefreshSession(...args),
@@ -14,6 +18,10 @@ vi.mock('../lib/api', () => ({
   exchangeCode: (...args: unknown[]) => mockExchangeCode(...args),
   changePassword: (...args: unknown[]) => mockChangePassword(...args),
   deleteAccount: (...args: unknown[]) => mockDeleteAccount(...args),
+  updateName: (...args: unknown[]) => mockUpdateName(...args),
+  listSessions: (...args: unknown[]) => mockListSessions(...args),
+  revokeSession: (...args: unknown[]) => mockRevokeSession(...args),
+  logoutEverywhere: (...args: unknown[]) => mockLogoutEverywhere(...args),
   ApiError: class ApiError extends Error {
     status: number
     constructor(status: number, message: string) {
@@ -55,6 +63,13 @@ beforeEach(() => {
   mockExchangeCode.mockReset()
   mockChangePassword.mockReset()
   mockDeleteAccount.mockReset()
+  mockUpdateName.mockReset()
+  mockListSessions.mockReset()
+  mockRevokeSession.mockReset()
+  mockLogoutEverywhere.mockReset()
+  // Default: an empty sessions list, so tests that don't care about the
+  // sessions card (most of them) don't have to stub this themselves.
+  mockListSessions.mockResolvedValue([])
   sessionStorage.clear()
 })
 
@@ -114,7 +129,9 @@ describe('AccountPage — code exchange (?code=...)', () => {
     await screen.findByText('Настройки аккаунта')
     expect(mockExchangeCode).toHaveBeenCalledWith('the-code', 'the-verifier')
     expect(mockFetchMe).not.toHaveBeenCalled()
-    expect(screen.getByText('Jane Doe')).toBeInTheDocument()
+    // The name now lives in an editable input, not static text (see the
+    // "editable name form" batch that redesigned ProfileCard).
+    expect(screen.getByDisplayValue('Jane Doe')).toBeInTheDocument()
   })
 
   it('removes the stored verifier from sessionStorage after reading it', async () => {
@@ -184,7 +201,9 @@ describe('AccountPage — rendered content', () => {
   it('shows the heading and the user name and email', async () => {
     await renderLoggedIn()
     expect(screen.getByText('Настройки аккаунта')).toBeInTheDocument()
-    expect(screen.getByText('Jane Doe')).toBeInTheDocument()
+    // The name now lives in an editable input, not static text (see the
+    // "editable name form" batch that redesigned ProfileCard).
+    expect(screen.getByDisplayValue('Jane Doe')).toBeInTheDocument()
     expect(screen.getByText('jane@example.com')).toBeInTheDocument()
   })
 
@@ -397,5 +416,225 @@ describe('AccountPage — logout', () => {
     const { user } = await renderLoggedIn()
     await user.click(screen.getByRole('button', { name: 'Выйти' }))
     expect(window.location.href).toMatch(/^\/logout/)
+  })
+})
+
+describe('AccountPage — editable name form', () => {
+  it('pre-fills the name input with the current name and shows the email as read-only text', async () => {
+    await renderLoggedIn()
+    expect(screen.getByLabelText('Имя')).toHaveValue('Jane Doe')
+    expect(screen.getByText('jane@example.com')).toBeInTheDocument()
+  })
+
+  it('disables Сохранить until the value differs from the original and is non-empty', async () => {
+    const { user } = await renderLoggedIn()
+    const input = screen.getByLabelText('Имя')
+    const button = screen.getByRole('button', { name: 'Сохранить' })
+    expect(button).toBeDisabled()
+
+    await user.clear(input)
+    await user.type(input, 'Jane Smith')
+    expect(button).toBeEnabled()
+
+    await user.clear(input)
+    expect(button).toBeDisabled()
+
+    await user.type(input, '   ')
+    expect(button).toBeDisabled()
+
+    await user.clear(input)
+    await user.type(input, 'Jane Doe')
+    expect(button).toBeDisabled()
+  })
+
+  it('calls updateName with the access token and the trimmed new name', async () => {
+    const { user } = await renderLoggedIn()
+    mockUpdateName.mockResolvedValue({ ...USER, name: 'Jane Smith' })
+
+    const input = screen.getByLabelText('Имя')
+    await user.clear(input)
+    await user.type(input, 'Jane Smith')
+    await user.click(screen.getByRole('button', { name: 'Сохранить' }))
+
+    await waitFor(() => expect(mockUpdateName).toHaveBeenCalled())
+    const args = mockUpdateName.mock.calls[0]
+    expect(args).toContain('Jane Smith')
+  })
+
+  it('shows a success message and updates the displayed value when updateName resolves', async () => {
+    const { user } = await renderLoggedIn()
+    mockUpdateName.mockResolvedValue({ id: '1', email: 'jane@example.com', name: 'Jane Smith', role: 'user' })
+
+    const input = screen.getByLabelText('Имя')
+    await user.clear(input)
+    await user.type(input, 'Jane Smith')
+    await user.click(screen.getByRole('button', { name: 'Сохранить' }))
+
+    await waitFor(() => {
+      const text = document.body.textContent ?? ''
+      expect(text).toMatch(/сохран/i)
+    })
+    expect(screen.getByDisplayValue('Jane Smith')).toBeInTheDocument()
+  })
+
+  it('shows an error and leaves the typed value untouched when updateName rejects', async () => {
+    const { user } = await renderLoggedIn()
+    mockUpdateName.mockRejectedValue(new Error('boom'))
+
+    const input = screen.getByLabelText('Имя')
+    await user.clear(input)
+    await user.type(input, 'Jane Smith')
+    await user.click(screen.getByRole('button', { name: 'Сохранить' }))
+
+    await waitFor(() => expect(mockUpdateName).toHaveBeenCalled())
+    expect(input).toHaveValue('Jane Smith')
+  })
+})
+
+describe('AccountPage — active sessions', () => {
+  const SESSION_CURRENT = {
+    id: 's1',
+    userAgent: 'Mozilla/5.0 Chrome/120',
+    ipAddress: '203.0.113.5',
+    createdAt: '2026-07-01T10:00:00.000Z',
+    expiresAt: '2026-07-08T10:00:00.000Z',
+    current: true,
+  }
+  const SESSION_OTHER = {
+    id: 's2',
+    userAgent: 'Mozilla/5.0 Safari/17',
+    ipAddress: '198.51.100.7',
+    createdAt: '2026-06-15T08:30:00.000Z',
+    expiresAt: '2026-06-22T08:30:00.000Z',
+    current: false,
+  }
+
+  // Climb from a text node up the DOM until we reach the smallest ancestor
+  // whose textContent contains the ip address AND either the revoke button's
+  // label or the "current device" indicator text - in a per-session row
+  // layout (the natural way to render a list of sessions) this lands on the
+  // full row wrapper for that specific session, letting us scope queries
+  // (e.g. for a revoke button) to just that row without knowing the exact
+  // markup.
+  function findRow(userAgentText: RegExp, ip: string): HTMLElement {
+    let el: HTMLElement = screen.getByText(userAgentText)
+    for (let i = 0; i < 8 && el.parentElement; i++) {
+      const text = el.textContent ?? ''
+      if (text.includes(ip) && (text.includes('Завершить') || /устройств/i.test(text))) return el
+      el = el.parentElement
+    }
+    return el
+  }
+
+  it('calls listSessions with the access token once bootstrap finishes', async () => {
+    mockListSessions.mockResolvedValue([])
+    await renderLoggedIn()
+    await waitFor(() => expect(mockListSessions).toHaveBeenCalledWith('token-abc'))
+  })
+
+  it('shows a loading indicator and no session rows while listSessions is pending', async () => {
+    mockListSessions.mockReturnValue(new Promise(() => {}))
+    await renderLoggedIn()
+    const text = document.body.textContent ?? ''
+    expect(text).toMatch(/загрузк/i)
+    expect(screen.queryByText(/Chrome\/120/)).not.toBeInTheDocument()
+  })
+
+  it('renders both sessions with their userAgent and ipAddress once listSessions resolves', async () => {
+    mockListSessions.mockResolvedValue([SESSION_CURRENT, SESSION_OTHER])
+    await renderLoggedIn()
+
+    expect(await screen.findByText(/Chrome\/120/)).toBeInTheDocument()
+    expect(screen.getByText(/Safari\/17/)).toBeInTheDocument()
+    // ipAddress is rendered alongside a formatted date in the same text node
+    // (e.g. "203.0.113.5 · 01.07.2026, 13:00"), so match it as a substring.
+    expect(screen.getByText(/203\.0\.113\.5/)).toBeInTheDocument()
+    expect(screen.getByText(/198\.51\.100\.7/)).toBeInTheDocument()
+  })
+
+  it('marks the current session with a "this device" indicator and no revoke button, and the other session with a revoke button and no indicator', async () => {
+    mockListSessions.mockResolvedValue([SESSION_CURRENT, SESSION_OTHER])
+    await renderLoggedIn()
+    await screen.findByText(/Chrome\/120/)
+
+    const currentRow = findRow(/Chrome\/120/, '203.0.113.5')
+    const otherRow = findRow(/Safari\/17/, '198.51.100.7')
+
+    expect(currentRow.textContent ?? '').toMatch(/устройств/i)
+    expect(within(currentRow).queryByRole('button', { name: 'Завершить' })).not.toBeInTheDocument()
+
+    expect(otherRow.textContent ?? '').not.toMatch(/устройств/i)
+    expect(within(otherRow).getByRole('button', { name: 'Завершить' })).toBeInTheDocument()
+  })
+
+  it('shows a no-sessions message when listSessions resolves with an empty array', async () => {
+    mockListSessions.mockResolvedValue([])
+    await renderLoggedIn()
+
+    await waitFor(() => expect(mockListSessions).toHaveBeenCalled())
+    const text = document.body.textContent ?? ''
+    expect(text).not.toMatch(/загрузк/i)
+    expect(screen.queryByRole('button', { name: 'Завершить' })).not.toBeInTheDocument()
+    // Some non-empty message indicating there is nothing to show.
+    expect(text.length).toBeGreaterThan(0)
+  })
+
+  it('shows a visible error instead of a loading indicator when listSessions rejects, without crashing', async () => {
+    mockListSessions.mockRejectedValue(new Error('network down'))
+    await renderLoggedIn()
+
+    await waitFor(() => {
+      const text = document.body.textContent ?? ''
+      expect(text).toMatch(/удалось|ошибк/i)
+    })
+    const text = document.body.textContent ?? ''
+    expect(text).not.toMatch(/загрузк/i)
+    expect(screen.getByText('Настройки аккаунта')).toBeInTheDocument()
+  })
+
+  it('revoking the non-current session calls revokeSession with the access token and its id, and removes it from the list on success', async () => {
+    mockListSessions.mockResolvedValue([SESSION_CURRENT, SESSION_OTHER])
+    const { user } = await renderLoggedIn()
+    await screen.findByText(/Safari\/17/)
+    mockRevokeSession.mockResolvedValue(undefined)
+
+    const otherRow = findRow(/Safari\/17/, '198.51.100.7')
+    await user.click(within(otherRow).getByRole('button', { name: 'Завершить' }))
+
+    await waitFor(() => expect(mockRevokeSession).toHaveBeenCalledWith('token-abc', 's2'))
+    await waitFor(() => expect(screen.queryByText(/Safari\/17/)).not.toBeInTheDocument())
+    expect(screen.getByText(/Chrome\/120/)).toBeInTheDocument()
+  })
+
+  it('renders a "Выйти на всех устройствах" button regardless of the sessions list state', async () => {
+    mockListSessions.mockResolvedValue([])
+    await renderLoggedIn()
+    expect(screen.getByRole('button', { name: 'Выйти на всех устройствах' })).toBeInTheDocument()
+  })
+
+  it('calls logoutEverywhere with the access token and navigates away on success', async () => {
+    mockListSessions.mockResolvedValue([SESSION_CURRENT, SESSION_OTHER])
+    const { user } = await renderLoggedIn()
+    await screen.findByText(/Chrome\/120/)
+    mockLogoutEverywhere.mockResolvedValue(undefined)
+    expect(window.location.href).toBe('')
+
+    await user.click(screen.getByRole('button', { name: 'Выйти на всех устройствах' }))
+
+    await waitFor(() => expect(mockLogoutEverywhere).toHaveBeenCalledWith('token-abc'))
+    await waitFor(() => expect(window.location.href).not.toBe(''))
+  })
+
+  it('shows an error and does not navigate when logoutEverywhere rejects', async () => {
+    mockListSessions.mockResolvedValue([SESSION_CURRENT, SESSION_OTHER])
+    const { user } = await renderLoggedIn()
+    await screen.findByText(/Chrome\/120/)
+    mockLogoutEverywhere.mockRejectedValue(new Error('boom'))
+
+    await user.click(screen.getByRole('button', { name: 'Выйти на всех устройствах' }))
+
+    await waitFor(() => expect(mockLogoutEverywhere).toHaveBeenCalled())
+    expect(window.location.href).toBe('')
+    expect(screen.getByText('Настройки аккаунта')).toBeInTheDocument()
   })
 })

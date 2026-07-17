@@ -18,6 +18,15 @@ interface RefreshResponse {
   accessToken: string
 }
 
+export interface Session {
+  id: string
+  userAgent: string | null
+  ipAddress: string | null
+  createdAt: string
+  expiresAt: string
+  current: boolean
+}
+
 export class ApiError extends Error {
   status: number
 
@@ -86,6 +95,24 @@ export function changePassword(accessToken: string, currentPassword: string, new
 
 export function deleteAccount(accessToken: string, password: string): Promise<{ ok: true }> {
   return authed('DELETE', '/account', accessToken, { password })
+}
+
+export function updateName(accessToken: string, name: string): Promise<AuthUser> {
+  return authed<AuthUser>('PATCH', '/name', accessToken, { name })
+}
+
+export function listSessions(accessToken: string): Promise<Session[]> {
+  return authed<Session[]>('GET', '/sessions', accessToken)
+}
+
+export function revokeSession(accessToken: string, id: string): Promise<{ ok: true }> {
+  return authed('DELETE', `/sessions/${id}`, accessToken)
+}
+
+// "Выйти на всех устройствах" - unlike changePassword, this does not
+// leave the calling browser's own session intact.
+export function logoutEverywhere(accessToken: string): Promise<{ ok: true }> {
+  return authed('DELETE', '/sessions', accessToken)
 }
 
 // PKCE handoff: the server issues a short-lived one-time code instead of

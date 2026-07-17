@@ -13,6 +13,11 @@ export const refreshTokens = sqliteTable('refresh_tokens', {
   id: text('id').primaryKey(),
   userId: text('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
   tokenHash: text('token_hash').notNull().unique(),
+  // Nullable: older rows predate this column, and not every caller sends
+  // a user-agent/forwardable IP. Shown on the account settings page's
+  // active-sessions list - not used for anything security-sensitive.
+  userAgent: text('user_agent'),
+  ipAddress: text('ip_address'),
   expiresAt: integer('expires_at', { mode: 'timestamp' }).notNull(),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
 })

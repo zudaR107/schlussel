@@ -1,8 +1,11 @@
 import { useState, useEffect } from 'react'
-import { KeyRound, Trash2 } from 'lucide-react'
-import { Button } from '@zudar107/schloss-ui'
+import { KeyRound, Trash2, User as UserIcon, Monitor } from 'lucide-react'
+import { Button, Field, Badge } from '@zudar107/schloss-ui'
 import { generateCodeVerifier, generateCodeChallenge } from '../../lib/pkce'
-import { refreshSession, fetchMe, exchangeCode, changePassword, deleteAccount, ApiError, type AuthUser } from '../../lib/api'
+import {
+  refreshSession, fetchMe, exchangeCode, changePassword, deleteAccount, updateName,
+  listSessions, revokeSession, logoutEverywhere, ApiError, type AuthUser, type Session,
+} from '../../lib/api'
 import { readReturnTo, DEFAULT_APP_URL, type ReturnToResult } from '../../lib/returnTo'
 import { PasswordField } from '../auth/PasswordField'
 import { Header } from '../../components/Header'
@@ -121,8 +124,13 @@ export function AccountPage() {
             </p>
           </div>
 
-          <ProfileCard user={user} />
+          <ProfileCard
+            user={user}
+            accessToken={accessToken}
+            onNameChange={(name) => setUser((u) => (u ? { ...u, name } : u))}
+          />
           <PasswordCard accessToken={accessToken} />
+          <SessionsCard accessToken={accessToken} />
           <DangerZoneCard accessToken={accessToken} />
         </div>
       </div>
@@ -132,20 +140,83 @@ export function AccountPage() {
   )
 }
 
-function ProfileCard({ user }: { user: AuthUser }) {
+interface ProfileCardProps {
+  user: AuthUser
+  accessToken: string
+  onNameChange: (name: string) => void
+}
+
+function ProfileCard({ user, accessToken, onNameChange }: ProfileCardProps) {
+  const [name, setName] = useState(user.name)
+  const [error, setError] = useState('')
+  const [success, setSuccess] = useState(false)
+  const [loading, setLoading] = useState(false)
+
+  useEffect(() => {
+    setName(user.name)
+  }, [user.name])
+
+  const trimmed = name.trim()
+  const dirty = trimmed.length > 0 && trimmed !== user.name
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    setError('')
+    setSuccess(false)
+    setLoading(true)
+    try {
+      const updated = await updateName(accessToken, trimmed)
+      onNameChange(updated.name)
+      setSuccess(true)
+    } catch {
+      setError('Не удалось сохранить имя')
+    } finally {
+      setLoading(false)
+    }
+  }
+
   return (
-    <div className="card" style={{ padding: '1.25rem 1.5rem', display: 'flex', alignItems: 'center', gap: '0.875rem' }}>
-      <div style={{
-        width: 44, height: 44, borderRadius: '50%', flexShrink: 0,
-        background: 'var(--accent)', color: '#fff', fontWeight: 700, fontSize: '1.0625rem',
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-      }}>
-        {user.name.trim().charAt(0).toUpperCase()}
+    <div className="card" style={{ padding: '1.5rem' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1rem' }}>
+        <UserIcon size={17} color="var(--text-secondary)" />
+        <h2 style={{ margin: 0, fontSize: '0.9375rem', fontWeight: 600, color: 'var(--text-primary)' }}>Профиль</h2>
       </div>
-      <div style={{ minWidth: 0 }}>
-        <div style={{ fontSize: '0.9375rem', fontWeight: 600, color: 'var(--text-primary)' }}>{user.name}</div>
+
+      <div style={{ display: 'flex', alignItems: 'center', gap: '0.875rem', marginBottom: '1.125rem' }}>
+        <div style={{
+          width: 44, height: 44, borderRadius: '50%', flexShrink: 0,
+          background: 'var(--accent)', color: '#fff', fontWeight: 700, fontSize: '1.0625rem',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+        }}>
+          {user.name.trim().charAt(0).toUpperCase()}
+        </div>
         <div style={{ fontSize: '0.8125rem', color: 'var(--text-muted)' }}>{user.email}</div>
       </div>
+
+      <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '0.875rem' }}>
+        <Field
+          id="account-name"
+          label="Имя"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          required
+        />
+
+        {error && (
+          <div style={{ padding: '0.625rem 0.75rem', background: 'var(--danger-muted)', border: '1px solid var(--danger)', borderRadius: 8, fontSize: '0.8125rem', color: 'var(--danger)' }}>
+            {error}
+          </div>
+        )}
+        {success && (
+          <div style={{ padding: '0.625rem 0.75rem', background: 'var(--success-muted)', border: '1px solid var(--success)', borderRadius: 8, fontSize: '0.8125rem', color: 'var(--success)' }}>
+            Имя сохранено.
+          </div>
+        )}
+
+        <Button type="submit" variant="primary" disabled={loading || !dirty} style={{ justifyContent: 'center', padding: '0.625rem' }}>
+          {loading ? 'Сохранение…' : 'Сохранить'}
+        </Button>
+      </form>
     </div>
   )
 }
@@ -229,6 +300,126 @@ function PasswordCard({ accessToken }: { accessToken: string }) {
           {loading ? 'Сохранение…' : 'Изменить пароль'}
         </Button>
       </form>
+    </div>
+  )
+}
+
+function formatSessionDate(iso: string): string {
+  return new Date(iso).toLocaleString('ru-RU', {
+    day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit',
+  })
+}
+
+function SessionsCard({ accessToken }: { accessToken: string }) {
+  const [sessions, setSessions] = useState<Session[] | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [revokingId, setRevokingId] = useState<string | null>(null)
+  const [loggingOutEverywhere, setLoggingOutEverywhere] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    listSessions(accessToken)
+      .then((s) => { if (!cancelled) setSessions(s) })
+      .catch(() => { if (!cancelled) setError('Не удалось загрузить список сессий') })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => {
+      cancelled = true
+    }
+  }, [accessToken])
+
+  async function handleRevoke(id: string) {
+    setError('')
+    setRevokingId(id)
+    try {
+      await revokeSession(accessToken, id)
+      setSessions((prev) => prev?.filter((s) => s.id !== id) ?? prev)
+    } catch {
+      setError('Не удалось завершить сессию')
+    } finally {
+      setRevokingId(null)
+    }
+  }
+
+  async function handleLogoutEverywhere() {
+    setError('')
+    setLoggingOutEverywhere(true)
+    try {
+      await logoutEverywhere(accessToken)
+      window.location.href = DEFAULT_APP_URL
+    } catch {
+      setError('Не удалось выйти на всех устройствах')
+      setLoggingOutEverywhere(false)
+    }
+  }
+
+  return (
+    <div className="card" style={{ padding: '1.5rem' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.75rem', marginBottom: '1rem' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+          <Monitor size={17} color="var(--text-secondary)" />
+          <h2 style={{ margin: 0, fontSize: '0.9375rem', fontWeight: 600, color: 'var(--text-primary)' }}>Активные сессии</h2>
+        </div>
+        <Button
+          variant="secondary"
+          onClick={handleLogoutEverywhere}
+          disabled={loggingOutEverywhere || !sessions}
+          style={{ padding: '0.4rem 0.75rem', fontSize: '0.75rem' }}
+        >
+          {loggingOutEverywhere ? 'Выход…' : 'Выйти на всех устройствах'}
+        </Button>
+      </div>
+
+      {error && (
+        <div style={{ padding: '0.625rem 0.75rem', background: 'var(--danger-muted)', border: '1px solid var(--danger)', borderRadius: 8, fontSize: '0.8125rem', color: 'var(--danger)', marginBottom: '0.875rem' }}>
+          {error}
+        </div>
+      )}
+
+      {loading ? (
+        <div style={{ color: 'var(--text-muted)', fontSize: '0.875rem' }}>Загрузка…</div>
+      ) : sessions === null ? null : sessions.length === 0 ? (
+        <div style={{ color: 'var(--text-muted)', fontSize: '0.875rem' }}>Нет активных сессий</div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.625rem' }}>
+          {sessions.map((s) => (
+            <div
+              key={s.id}
+              style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.75rem',
+                padding: '0.625rem 0.75rem', border: '1px solid var(--border)', borderRadius: 8,
+              }}
+            >
+              <div style={{ minWidth: 0 }}>
+                <div
+                  title={s.userAgent ?? undefined}
+                  style={{
+                    fontSize: '0.8125rem', color: 'var(--text-primary)', fontWeight: 500,
+                    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                  }}
+                >
+                  {s.userAgent ?? 'Неизвестное устройство'}
+                </div>
+                <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                  {s.ipAddress ?? '—'} · {formatSessionDate(s.createdAt)}
+                </div>
+              </div>
+              {s.current ? (
+                <Badge variant="success">Это устройство</Badge>
+              ) : (
+                <Button
+                  variant="ghost"
+                  onClick={() => handleRevoke(s.id)}
+                  disabled={revokingId === s.id}
+                  style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem', flexShrink: 0 }}
+                >
+                  {revokingId === s.id ? 'Завершение…' : 'Завершить'}
+                </Button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   )
 }
